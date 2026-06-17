@@ -1,5 +1,5 @@
 === GALADO Club Bridge ===
-Stable tag: 0.3.0
+Stable tag: 0.4.0
 Requires at least: 5.8
 Requires PHP: 7.4
 License: GPLv2 or later
@@ -9,6 +9,8 @@ Connects galado.com.my (WooCommerce) to GALADO Club (club.galado.com.my): My Acc
 order/warranty/review webhooks for G-Coin crediting.
 
 == Changelog ==
+= 0.4.0 =
+* Referral RM10 welcome: -RM10 at checkout for a referred new customer (galado_ref cookie + no prior paid orders, min RM30 subtotal).
 = 0.3.0 =
 * Referral program: capture ?ref= into a 30-day cookie and stamp it onto orders (classic + block checkout); the Club credits the referrer 10% of net spend.
 = 0.2.3 =

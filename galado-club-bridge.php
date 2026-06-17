@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.3.0
+ * Version: 0.4.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,9 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.3.0';
+    const VERSION  = '0.4.0';
+    const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
+    const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the welcome discount applies
 
     public static function init() {
         add_action('init', [__CLASS__, 'add_endpoint']);
@@ -34,6 +36,8 @@ final class Galado_Club_Bridge {
         add_action('wp_footer', [__CLASS__, 'ref_cookie_script']);
         add_action('woocommerce_checkout_create_order', [__CLASS__, 'capture_referral'], 10, 1);
         add_action('woocommerce_store_api_checkout_update_order_from_request', [__CLASS__, 'capture_referral'], 10, 1);
+        // Referral: RM10 off a referred NEW customer's first order.
+        add_action('woocommerce_cart_calculate_fees', [__CLASS__, 'referral_welcome_discount']);
         register_activation_hook(__FILE__, 'flush_rewrite_rules');
         register_deactivation_hook(__FILE__, 'flush_rewrite_rules');
     }
@@ -135,6 +139,46 @@ final class Galado_Club_Bridge {
         if ('' !== $code) {
             $order->update_meta_data('galado_ref', strtoupper($code));
         }
+    }
+
+    /**
+     * RM10 welcome discount for a referred NEW customer: galado_ref cookie present AND no
+     * prior paid orders. Applied as a negative cart fee so it shows on cart + checkout and
+     * flows into the order total (so the referrer's 10% is on what the friend actually paid).
+     * Existing customers never get it; a min subtotal protects margin.
+     */
+    public static function referral_welcome_discount($cart) {
+        if ((is_admin() && !defined('DOING_AJAX')) || !function_exists('WC')) {
+            return;
+        }
+        if (empty($_COOKIE['galado_ref'])) {
+            return;
+        }
+        if ((float) $cart->get_subtotal() < self::WELCOME_MIN) {
+            return;
+        }
+        if (self::is_existing_customer()) {
+            return;
+        }
+        $cart->add_fee(__('Referral welcome — RM10 off your first order', 'galado-club'), -1 * self::WELCOME_AMOUNT, false);
+    }
+
+    /** True if this shopper has a prior paid order (logged-in, or guest matched by billing email). */
+    private static function is_existing_customer() {
+        if (is_user_logged_in()) {
+            return (int) wc_get_customer_order_count(get_current_user_id()) > 0;
+        }
+        $email = (WC()->customer) ? WC()->customer->get_billing_email() : '';
+        if (!$email) {
+            return false; // unknown guest → treat as new (re-checked once they enter an email at checkout)
+        }
+        $orders = wc_get_orders([
+            'billing_email' => $email,
+            'status'        => ['wc-completed', 'wc-processing'],
+            'limit'         => 1,
+            'return'        => 'ids',
+        ]);
+        return !empty($orders);
     }
 
     /**
@@ -276,7 +320,7 @@ final class Galado_Club_Bridge {
             'methods'             => 'GET',
             'permission_callback' => '__return_true',
             'callback'            => function () {
-                return ['ok' => true, 'version' => self::VERSION, 'hooks' => ['transition_comment_status', 'comment_post', 'woocommerce_checkout_create_order']];
+                return ['ok' => true, 'version' => self::VERSION, 'hooks' => ['transition_comment_status', 'comment_post', 'woocommerce_checkout_create_order', 'woocommerce_cart_calculate_fees']];
             },
         ]);
         register_rest_route('galado-club/v1', '/tier', [
