@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.2.3
+ * Version: 0.3.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.2.3';
+    const VERSION  = '0.3.0';
 
     public static function init() {
         add_action('init', [__CLASS__, 'add_endpoint']);
@@ -30,6 +30,10 @@ final class Galado_Club_Bridge {
         add_action('rest_api_init', [__CLASS__, 'rest_routes']);
         add_action('transition_comment_status', [__CLASS__, 'on_comment_transition'], 10, 3);
         add_action('comment_post', [__CLASS__, 'on_comment_post'], 10, 2);
+        // Referral: capture ?ref= into a 30-day cookie, then stamp it onto the order at checkout.
+        add_action('wp_footer', [__CLASS__, 'ref_cookie_script']);
+        add_action('woocommerce_checkout_create_order', [__CLASS__, 'capture_referral'], 10, 1);
+        add_action('woocommerce_store_api_checkout_update_order_from_request', [__CLASS__, 'capture_referral'], 10, 1);
         register_activation_hook(__FILE__, 'flush_rewrite_rules');
         register_deactivation_hook(__FILE__, 'flush_rewrite_rules');
     }
@@ -102,6 +106,35 @@ final class Galado_Club_Bridge {
                 'rating'     => (int) get_comment_meta($comment->comment_ID, 'rating', true),
             ]),
         ]);
+    }
+
+    /**
+     * Referral capture — client side. Outputs a tiny script on every front-end page that,
+     * when the URL carries ?ref=CODE, stores it in a 30-day first-party cookie. It reads the
+     * live URL in the browser, so it works even on fully cached pages.
+     */
+    public static function ref_cookie_script() {
+        if (is_admin()) {
+            return;
+        }
+        ?>
+<script>(function(){try{var r=new URLSearchParams(location.search).get('ref');if(!r)return;r=r.replace(/[^A-Za-z0-9]/g,'').slice(0,12).toUpperCase();if(!r)return;var e=new Date(Date.now()+2592e6).toUTCString();document.cookie='galado_ref='+r+'; expires='+e+'; path=/; SameSite=Lax';}catch(e){}})();</script>
+<?php
+    }
+
+    /**
+     * Referral capture — server side. At checkout, copy the galado_ref cookie onto the order
+     * as PUBLIC meta (no underscore) so it rides the WooCommerce order webhook to the Club,
+     * which credits the referrer. Fires for both classic and block (Store API) checkout.
+     */
+    public static function capture_referral($order) {
+        if (!$order || empty($_COOKIE['galado_ref'])) {
+            return;
+        }
+        $code = substr(preg_replace('/[^A-Za-z0-9]/', '', (string) wp_unslash($_COOKIE['galado_ref'])), 0, 12);
+        if ('' !== $code) {
+            $order->update_meta_data('galado_ref', strtoupper($code));
+        }
     }
 
     /**
@@ -243,7 +276,7 @@ final class Galado_Club_Bridge {
             'methods'             => 'GET',
             'permission_callback' => '__return_true',
             'callback'            => function () {
-                return ['ok' => true, 'version' => self::VERSION, 'hooks' => ['transition_comment_status', 'comment_post']];
+                return ['ok' => true, 'version' => self::VERSION, 'hooks' => ['transition_comment_status', 'comment_post', 'woocommerce_checkout_create_order']];
             },
         ]);
         register_rest_route('galado-club/v1', '/tier', [
