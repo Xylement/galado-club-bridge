@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.6.1
+ * Version: 0.6.2
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.6.1';
+    const VERSION  = '0.6.2';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the welcome discount applies
 
@@ -291,6 +291,12 @@ final class Galado_Club_Bridge {
             . 'padding:14px 30px;border-radius:999px;">' . esc_html($label) . ' &rarr;</a>';
     }
 
+    /** The branded GALADO coin (gold dubloon) image — used in place of the generic 🪙 emoji. */
+    private static function coin_icon() {
+        return '<img src="' . esc_url(self::club_url() . '/coin.png') . '" alt="" '
+            . 'style="height:1.1em;width:auto;vertical-align:-0.18em;margin-right:8px;display:inline-block;" />';
+    }
+
     private static function render_club_card($user, $heading) {
         $summary   = self::fetch_summary($user->user_email, $user->ID);
         $token     = self::sso_token($user);
@@ -375,7 +381,7 @@ final class Galado_Club_Bridge {
         echo '<section style="border:1px solid #f3ddd2;border-radius:20px;padding:24px;background:#fff9f4;margin:24px 0;font-family:\'Nunito\',sans-serif;color:#3a2a22;">';
         $hstyle = "margin-top:0;font-family:'Baloo 2',sans-serif;font-weight:800;color:#d85a30;";
         if ($earned) {
-            echo '<h2 style="' . $hstyle . '">🪙 You just earned ~' . esc_html(number_format_i18n($coins_est)) . ' G-Coins!</h2>';
+            echo '<h2 style="' . $hstyle . '">' . self::coin_icon() . 'You just earned ~' . esc_html(number_format_i18n($coins_est)) . ' G-Coins!</h2>';
             echo '<p style="margin:0 0 12px;">Spend them on looks, dress up your little Buddy, and climb the leaderboard in GALADO Club.</p>';
         } else {
             echo '<h2 style="' . $hstyle . '">🎀 Your GALADO Club is waiting</h2>';
