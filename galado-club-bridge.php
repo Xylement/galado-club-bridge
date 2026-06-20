@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.5.2
+ * Version: 0.6.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.5.2';
+    const VERSION  = '0.6.0';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the welcome discount applies
 
@@ -279,6 +279,18 @@ final class Galado_Club_Bridge {
     }
 
     /** Shared Club panel (portrait + tier + coins + Enter button) for a logged-in user. */
+    /** Load the Club app's fonts (Baloo 2 + Nunito) so the cards match the Club, not the store theme. */
+    private static function club_font_link() {
+        return '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;700;800&family=Nunito:wght@400;600;700&display=swap">';
+    }
+
+    /** Coral pill CTA matching the Club app buttons (avoids the store theme's square .button). */
+    private static function cta_pill($url, $label) {
+        return '<a href="' . esc_url($url) . '" style="display:inline-block;background:#ff7a59;color:#fff;'
+            . "font-family:'Baloo 2',sans-serif;font-weight:700;font-size:16px;line-height:1;text-decoration:none;"
+            . 'padding:14px 30px;border-radius:999px;">' . esc_html($label) . ' &rarr;</a>';
+    }
+
     private static function render_club_card($user, $heading) {
         $summary   = self::fetch_summary($user->user_email, $user->ID);
         $token     = self::sso_token($user);
@@ -291,8 +303,9 @@ final class Galado_Club_Bridge {
             'black'   => 'GALADO Black',
         ];
 
-        echo '<div style="border:1px solid #f3ddd2;border-radius:20px;padding:24px;background:#fff9f4;">';
-        echo '<h3 style="margin-top:0;">' . esc_html($heading) . '</h3>';
+        echo self::club_font_link();
+        echo '<div style="border:1px solid #f3ddd2;border-radius:20px;padding:24px;background:#fff9f4;font-family:\'Nunito\',sans-serif;color:#3a2a22;">';
+        echo '<h3 style="margin-top:0;font-family:\'Baloo 2\',sans-serif;font-weight:800;color:#3a2a22;">' . esc_html($heading) . '</h3>';
 
         if ($summary) {
             $portrait = self::portrait_url($summary);
@@ -309,7 +322,7 @@ final class Galado_Club_Bridge {
             echo '<p>Your coins, badges and avatar are waiting &mdash; every GALADO order earns G-Coins.</p>';
         }
 
-        echo '<p style="margin-bottom:0;"><a class="button" href="' . esc_url($enter_url) . '">Enter the Club &rarr;</a></p>';
+        echo '<p style="margin:14px 0 0;">' . self::cta_pill($enter_url, 'Enter the Club') . '</p>';
         echo '</div>';
     }
 
@@ -339,6 +352,7 @@ final class Galado_Club_Bridge {
     public static function thankyou_block($order_id) {
         // Hide third-party social-login "link your account" buttons on the order-received page.
         echo '<style>.woocommerce-order-received .wc-social-login,.woocommerce-order-received .nsl-container{display:none!important;}</style>';
+        echo self::club_font_link();
 
         $order = wc_get_order($order_id);
         if (!$order) {
@@ -358,12 +372,13 @@ final class Galado_Club_Bridge {
         $coins_est = (int) round($net * (isset($mult[$tier]) ? $mult[$tier] : 1.0));
         $earned    = $coins_est >= 1;
 
-        echo '<section style="border:1px solid #f3ddd2;border-radius:20px;padding:24px;background:#fff9f4;margin:24px 0;">';
+        echo '<section style="border:1px solid #f3ddd2;border-radius:20px;padding:24px;background:#fff9f4;margin:24px 0;font-family:\'Nunito\',sans-serif;color:#3a2a22;">';
+        $hstyle = "margin-top:0;font-family:'Baloo 2',sans-serif;font-weight:800;color:#d85a30;";
         if ($earned) {
-            echo '<h2 style="margin-top:0;color:#d85a30;">🪙 You just earned ~' . esc_html(number_format_i18n($coins_est)) . ' G-Coins!</h2>';
+            echo '<h2 style="' . $hstyle . '">🪙 You just earned ~' . esc_html(number_format_i18n($coins_est)) . ' G-Coins!</h2>';
             echo '<p style="margin:0 0 12px;">Spend them on looks, dress up your little Buddy, and climb the leaderboard in GALADO Club.</p>';
         } else {
-            echo '<h2 style="margin-top:0;color:#d85a30;">🎀 Your GALADO Club is waiting</h2>';
+            echo '<h2 style="' . $hstyle . '">🎀 Your GALADO Club is waiting</h2>';
             echo '<p style="margin:0 0 12px;">Dress up your little Buddy, spend your G-Coins on looks, and join The Lounge.</p>';
         }
 
@@ -373,7 +388,7 @@ final class Galado_Club_Bridge {
             }
             $token = self::sso_token($user);
             $enter = $token ? self::club_url() . '/sso?token=' . rawurlencode($token) : self::club_url();
-            echo '<a class="button" href="' . esc_url($enter) . '">Open my Club &rarr;</a>';
+            echo self::cta_pill($enter, 'Open my Club');
         } else {
             $email = $order->get_billing_email();
             echo '<p style="margin:0 0 14px;">Create your free GALADO Club account' . ($earned ? ' to claim them' : '');
@@ -381,7 +396,7 @@ final class Galado_Club_Bridge {
                 echo ' &mdash; sign in with <strong>' . esc_html($email) . '</strong>';
             }
             echo '.</p>';
-            echo '<a class="button" href="' . esc_url(self::club_url()) . '">' . ($earned ? 'Claim my G-Coins' : 'Join GALADO Club') . ' &rarr;</a>';
+            echo self::cta_pill(self::club_url(), $earned ? 'Claim my G-Coins' : 'Join GALADO Club');
         }
         echo '</section>';
     }
