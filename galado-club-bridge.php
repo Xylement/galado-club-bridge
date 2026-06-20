@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.5.0
+ * Version: 0.5.1
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.5.0';
+    const VERSION  = '0.5.1';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the welcome discount applies
 
@@ -328,7 +328,10 @@ final class Galado_Club_Bridge {
         if (!$user || 0 === $user->ID) {
             return;
         }
+        // Gap below so the card isn't flush against the account menu beneath it.
+        echo '<div style="margin:0 0 2rem;">';
         self::render_club_card($user, 'GALADO Club');
+        echo '</div>';
     }
 
     /** Order-received (Thank-you) page: celebrate the coins just earned + send them in.
