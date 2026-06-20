@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.4.0
+ * Version: 0.5.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.4.0';
+    const VERSION  = '0.5.0';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the welcome discount applies
 
@@ -29,6 +29,9 @@ final class Galado_Club_Bridge {
         add_action('init', [__CLASS__, 'add_endpoint']);
         add_filter('woocommerce_account_menu_items', [__CLASS__, 'menu_item']);
         add_action('woocommerce_account_' . self::ENDPOINT . '_endpoint', [__CLASS__, 'render_tab']);
+        // On-site activation (post-payment + account only — never before checkout):
+        add_action('woocommerce_account_dashboard', [__CLASS__, 'dashboard_card']);
+        add_action('woocommerce_thankyou', [__CLASS__, 'thankyou_block']);
         add_action('rest_api_init', [__CLASS__, 'rest_routes']);
         add_action('transition_comment_status', [__CLASS__, 'on_comment_transition'], 10, 3);
         add_action('comment_post', [__CLASS__, 'on_comment_post'], 10, 2);
@@ -275,11 +278,8 @@ final class Galado_Club_Bridge {
         return $data;
     }
 
-    public static function render_tab() {
-        $user = wp_get_current_user();
-        if (!$user || 0 === $user->ID) {
-            return;
-        }
+    /** Shared Club panel (portrait + tier + coins + Enter button) for a logged-in user. */
+    private static function render_club_card($user, $heading) {
         $summary   = self::fetch_summary($user->user_email, $user->ID);
         $token     = self::sso_token($user);
         $enter_url = $token ? self::club_url() . '/sso?token=' . rawurlencode($token) : self::club_url();
@@ -292,7 +292,7 @@ final class Galado_Club_Bridge {
         ];
 
         echo '<div style="border:1px solid #f3ddd2;border-radius:20px;padding:24px;background:#fff9f4;">';
-        echo '<h3 style="margin-top:0;">GALADO Club</h3>';
+        echo '<h3 style="margin-top:0;">' . esc_html($heading) . '</h3>';
 
         if ($summary) {
             $portrait = self::portrait_url($summary);
@@ -303,14 +303,78 @@ final class Galado_Club_Bridge {
             echo '<img src="' . esc_url($portrait) . '" alt="Your Club avatar" width="96" height="96" style="border-radius:50%;object-fit:cover;object-position:top;border:4px solid #ffd9cf;" />';
             echo '<div>';
             echo '<p style="margin:0 0 4px;"><strong>' . esc_html($tier) . '</strong> member</p>';
-            echo '<p style="margin:0 0 12px;">' . esc_html(number_format_i18n($coins)) . ' G-Coins ready to spend</p>';
+            echo '<p style="margin:0 0 12px;">' . esc_html(number_format_i18n($coins)) . ' G-Coins ready to spend &mdash; dress up your Buddy &amp; join The Lounge.</p>';
             echo '</div></div>';
         } else {
-            echo '<p>Your coins, badges and avatar are waiting — every GALADO order earns G-Coins.</p>';
+            echo '<p>Your coins, badges and avatar are waiting &mdash; every GALADO order earns G-Coins.</p>';
         }
 
         echo '<p style="margin-bottom:0;"><a class="button" href="' . esc_url($enter_url) . '">Enter the Club &rarr;</a></p>';
         echo '</div>';
+    }
+
+    /** My Account → "GALADO Club" tab. */
+    public static function render_tab() {
+        $user = wp_get_current_user();
+        if (!$user || 0 === $user->ID) {
+            return;
+        }
+        self::render_club_card($user, 'GALADO Club');
+    }
+
+    /** My Account → dashboard: a Club card so repeat customers see it every visit. */
+    public static function dashboard_card() {
+        $user = wp_get_current_user();
+        if (!$user || 0 === $user->ID) {
+            return;
+        }
+        self::render_club_card($user, 'GALADO Club');
+    }
+
+    /** Order-received (Thank-you) page: celebrate the coins just earned + send them in.
+     *  Fires only AFTER payment, so it never distracts from checkout. */
+    public static function thankyou_block($order_id) {
+        $order = wc_get_order($order_id);
+        if (!$order) {
+            return;
+        }
+        $net  = max(0.0, (float) $order->get_total() - (float) $order->get_shipping_total());
+        $user = $order->get_user(); // WP_User, or false for guest checkout
+        $mult = ['silver' => 1.0, 'gold' => 1.2, 'diamond' => 1.5, 'black' => 2.0];
+        $tier = 'silver';
+        $summary = null;
+        if ($user) {
+            $summary = self::fetch_summary($user->user_email, $user->ID);
+            if ($summary && isset($summary['tier'])) {
+                $tier = $summary['tier'];
+            }
+        }
+        $coins_est = (int) round($net * (isset($mult[$tier]) ? $mult[$tier] : 1.0));
+        if ($coins_est < 1) {
+            return;
+        }
+
+        echo '<section style="border:1px solid #f3ddd2;border-radius:20px;padding:24px;background:#fff9f4;margin:24px 0;">';
+        echo '<h2 style="margin-top:0;color:#d85a30;">🪙 You just earned ~' . esc_html(number_format_i18n($coins_est)) . ' G-Coins!</h2>';
+        echo '<p style="margin:0 0 12px;">Spend them on looks, dress up your little Buddy, and climb the leaderboard in GALADO Club.</p>';
+
+        if ($user) {
+            if ($summary && isset($summary['coins'])) {
+                echo '<p style="margin:0 0 14px;">Your Club balance so far: <strong>' . esc_html(number_format_i18n((int) $summary['coins'])) . ' G-Coins</strong> <span style="opacity:.7;">(this order&rsquo;s coins land once it&rsquo;s processed).</span></p>';
+            }
+            $token = self::sso_token($user);
+            $enter = $token ? self::club_url() . '/sso?token=' . rawurlencode($token) : self::club_url();
+            echo '<a class="button" href="' . esc_url($enter) . '">Open my Club &rarr;</a>';
+        } else {
+            $email = $order->get_billing_email();
+            echo '<p style="margin:0 0 14px;">Create your free GALADO Club account to claim them';
+            if ($email) {
+                echo ' &mdash; sign in with <strong>' . esc_html($email) . '</strong>';
+            }
+            echo '.</p>';
+            echo '<a class="button" href="' . esc_url(self::club_url()) . '">Claim my G-Coins &rarr;</a>';
+        }
+        echo '</section>';
     }
 
     /** Club -> WP: mirror tier into user meta (Klaviyo segments + early-access gate). */
