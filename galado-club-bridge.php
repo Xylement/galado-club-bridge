@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.7.0
+ * Version: 0.7.1
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.7.0';
+    const VERSION  = '0.7.1';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the welcome discount applies
 
@@ -235,13 +235,14 @@ final class Galado_Club_Bridge {
         $stem   = '/avatar-' . $base . ($outfit ? '-' . $outfit : '');
         $colors = self::scene_colors($scene);
 
-        // 2) Scenery equipped → transparent chibi over the scene sky gradient.
+        // 2) Scenery equipped → transparent chibi over the scene sky. The gradient goes on the
+        //    <img> ITSELF (+ !important): the store theme forces a white <img> background that
+        //    hides a wrapper div's gradient, and inline !important beats even a themed !important.
         if ($colors) {
             $cut = self::club_url() . $stem . '-cut.png';
-            return '<div style="position:relative;width:' . $sz . 'px;height:' . $sz . 'px;border-radius:50%;overflow:hidden;border:4px solid #ffd9cf;flex:none;'
-                . 'background:linear-gradient(170deg,' . esc_attr($colors[0]) . ',' . esc_attr($colors[1]) . ');">'
-                . '<img src="' . esc_url($cut) . '" alt="Your Club avatar" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:top center;" />'
-                . '</div>';
+            return '<img src="' . esc_url($cut) . '" alt="Your Club avatar" width="' . $sz . '" height="' . $sz . '" '
+                . 'style="border-radius:50%;border:4px solid #ffd9cf;object-fit:cover;object-position:top center;flex:none;'
+                . 'background:linear-gradient(170deg,' . esc_attr($colors[0]) . ',' . esc_attr($colors[1]) . ') !important;" />';
         }
 
         // 3) Plain studio portrait.
