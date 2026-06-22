@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.6.2
+ * Version: 0.7.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.6.2';
+    const VERSION  = '0.7.0';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the welcome discount applies
 
@@ -184,32 +184,84 @@ final class Galado_Club_Bridge {
         return !empty($orders);
     }
 
-    /**
-     * Mirror the Club home's 2D portrait selection (web Dashboard.tsx + cosmetics.ts):
-     * custom uploaded photo -> outfit-aware portrait -> plain base buddy.
-     */
-    private static function portrait_url(array $summary) {
-        $base = isset($summary['avatarBase']) && 'boy' === $summary['avatarBase'] ? 'boy' : 'girl';
+    /** Scene sky colours — keep in sync with web/src/lib/sceneFx.ts SCENE_FX (top, bottom). */
+    private static function scene_colors($slug) {
+        $m = [
+            'scene-pastel-dream'   => ['#ffc9e6', '#c6ccff'],
+            'scene-sunset-glow'    => ['#ffb15e', '#7d5a9c'],
+            'scene-starry-night'   => ['#241f48', '#5b4b8a'],
+            'scene-ocean-breeze'   => ['#bfe9ff', '#7fd1e8'],
+            'scene-galado-coral'   => ['#ffe0d2', '#ff5e4d'],
+            'scene-kl-skyline'     => ['#1b2147', '#c7b2c2'],
+            'scene-penang-kek'     => ['#5a3f6e', '#ffc488'],
+            'scene-blossom-garden' => ['#ffbcd6', '#e6dafb'],
+        ];
+        return isset($m[$slug]) ? $m[$slug] : null;
+    }
 
-        // 1) Custom uploaded photo wins. Served by the Club origin, so prefix root-relative paths
-        //    (this <img> renders on galado.com.my, not the Club domain).
+    /**
+     * Avatar circle mirroring the Club home (Dashboard.tsx / AvatarPortrait.tsx):
+     * custom photo -> the member standing in their equipped Scenery (transparent chibi
+     * over the scene sky) -> plain studio portrait. Images are served by the Club origin.
+     */
+    private static function avatar_html(array $summary, $size = 96) {
+        $base = isset($summary['avatarBase']) && 'boy' === $summary['avatarBase'] ? 'boy' : 'girl';
+        $sz   = (int) $size;
+        $ring = 'border-radius:50%;border:4px solid #ffd9cf;object-fit:cover;object-position:top;flex:none;';
+
+        // 1) Custom uploaded photo wins (prefix root-relative paths — this renders on galado.com.my).
         $custom = isset($summary['customPhoto']) ? trim((string) $summary['customPhoto']) : '';
         if ($custom !== '') {
-            return preg_match('#^https?://#i', $custom) ? $custom : self::club_url() . '/' . ltrim($custom, '/');
+            $url = preg_match('#^https?://#i', $custom) ? $custom : self::club_url() . '/' . ltrim($custom, '/');
+            return '<img src="' . esc_url($url) . '" alt="Your Club avatar" width="' . $sz . '" height="' . $sz . '" style="' . $ring . '" />';
         }
 
-        // 2) Outfit-aware portrait — only outfits with a baked 2D portrait. Keep in sync with cosmetics.ts.
-        $portrait_outfits = ['outfit-cozy-hoodie-set', 'outfit-summer-tee-shorts'];
+        // Equipped outfit (only those with a baked 2D portrait) + scene.
+        $portrait_outfits = ['outfit-cozy-hoodie-set', 'outfit-summer-tee-shorts', 'outfit-futuristic', 'outfit-formal', 'outfit-baju-raya'];
+        $outfit = '';
+        $scene  = '';
         if (!empty($summary['equipped']) && is_array($summary['equipped'])) {
             foreach ($summary['equipped'] as $eq) {
-                if (isset($eq['slot'], $eq['slug']) && 'outfit' === $eq['slot'] && in_array($eq['slug'], $portrait_outfits, true)) {
-                    return self::club_url() . '/avatar-' . $base . '-' . $eq['slug'] . '.png';
+                if (!isset($eq['slot'], $eq['slug'])) {
+                    continue;
+                }
+                if ('outfit' === $eq['slot'] && in_array($eq['slug'], $portrait_outfits, true)) {
+                    $outfit = $eq['slug'];
+                } elseif ('scene' === $eq['slot']) {
+                    $scene = $eq['slug'];
                 }
             }
         }
+        $stem   = '/avatar-' . $base . ($outfit ? '-' . $outfit : '');
+        $colors = self::scene_colors($scene);
 
-        // 3) Plain base buddy.
-        return self::club_url() . '/avatar-' . $base . '.png';
+        // 2) Scenery equipped → transparent chibi over the scene sky gradient.
+        if ($colors) {
+            $cut = self::club_url() . $stem . '-cut.png';
+            return '<div style="position:relative;width:' . $sz . 'px;height:' . $sz . 'px;border-radius:50%;overflow:hidden;border:4px solid #ffd9cf;flex:none;'
+                . 'background:linear-gradient(170deg,' . esc_attr($colors[0]) . ',' . esc_attr($colors[1]) . ');">'
+                . '<img src="' . esc_url($cut) . '" alt="Your Club avatar" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:top center;" />'
+                . '</div>';
+        }
+
+        // 3) Plain studio portrait.
+        return '<img src="' . esc_url(self::club_url() . $stem . '.png') . '" alt="Your Club avatar" width="' . $sz . '" height="' . $sz . '" style="' . $ring . '" />';
+    }
+
+    /** Tier badge pill — mirrors the Club's .tier-chip gradients (silver/gold/diamond/black). */
+    private static function tier_pill($tier) {
+        $grad = [
+            'silver'  => 'linear-gradient(135deg,#b9c4d0,#9aa7b5)',
+            'gold'    => 'linear-gradient(135deg,#f4c976,#e9a93d)',
+            'diamond' => 'linear-gradient(135deg,#a4dcf2,#6fc7e8)',
+            'black'   => 'linear-gradient(135deg,#4a3d50,#2e2630)',
+        ];
+        $labels = ['silver' => 'Silver', 'gold' => 'Gold', 'diamond' => 'Diamond', 'black' => 'GALADO Black'];
+        $key    = isset($grad[$tier]) ? $tier : 'silver';
+        $extra  = 'black' === $key ? 'box-shadow:inset 0 0 0 1.5px #ffe9a8;' : '';
+        return '<span style="display:inline-block;background:' . $grad[$key] . ';color:#fff;'
+            . "font-family:'Baloo 2',sans-serif;font-weight:800;font-size:12px;letter-spacing:.04em;text-transform:uppercase;"
+            . 'padding:5px 13px;border-radius:999px;' . $extra . '">' . esc_html($labels[$key]) . '</span>';
     }
 
     public static function add_endpoint() {
@@ -302,26 +354,19 @@ final class Galado_Club_Bridge {
         $token     = self::sso_token($user);
         $enter_url = $token ? self::club_url() . '/sso?token=' . rawurlencode($token) : self::club_url();
 
-        $tier_labels = [
-            'silver'  => 'Silver',
-            'gold'    => 'Gold',
-            'diamond' => 'Diamond',
-            'black'   => 'GALADO Black',
-        ];
-
         echo self::club_font_link();
         echo '<div style="border:1px solid #f3ddd2;border-radius:20px;padding:24px;background:#fff9f4;font-family:\'Nunito\',sans-serif;color:#3a2a22;">';
         echo '<h3 style="margin-top:0;font-family:\'Baloo 2\',sans-serif;font-weight:800;color:#3a2a22;">' . esc_html($heading) . '</h3>';
 
         if ($summary) {
-            $portrait = self::portrait_url($summary);
-            $tier     = isset($summary['tier'], $tier_labels[$summary['tier']]) ? $tier_labels[$summary['tier']] : 'Silver';
-            $coins    = isset($summary['coins']) ? (int) $summary['coins'] : 0;
+            $coins = isset($summary['coins']) ? (int) $summary['coins'] : 0;
 
             echo '<div style="display:flex;gap:20px;align-items:center;flex-wrap:wrap;">';
-            echo '<img src="' . esc_url($portrait) . '" alt="Your Club avatar" width="96" height="96" style="border-radius:50%;object-fit:cover;object-position:top;border:4px solid #ffd9cf;" />';
+            echo self::avatar_html($summary, 96);
             echo '<div>';
-            echo '<p style="margin:0 0 4px;"><strong>' . esc_html($tier) . '</strong> member</p>';
+            echo '<p style="margin:0 0 6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">'
+                . self::tier_pill(isset($summary['tier']) ? $summary['tier'] : 'silver')
+                . '<span style="opacity:.7;">member</span></p>';
             echo '<p style="margin:0 0 12px;">' . esc_html(number_format_i18n($coins)) . ' G-Coins ready to spend &mdash; dress up your Buddy &amp; join The Lounge.</p>';
             echo '</div></div>';
         } else {
