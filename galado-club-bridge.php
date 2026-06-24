@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.7.1
+ * Version: 0.8.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,9 +21,11 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.7.1';
+    const VERSION  = '0.8.0';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
-    const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the welcome discount applies
+    const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
+    const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
+    const WELCOME30_MIN    = 120;// min cart subtotal (RM) for the Club welcome offer
 
     public static function init() {
         add_action('init', [__CLASS__, 'add_endpoint']);
@@ -39,8 +41,10 @@ final class Galado_Club_Bridge {
         add_action('wp_footer', [__CLASS__, 'ref_cookie_script']);
         add_action('woocommerce_checkout_create_order', [__CLASS__, 'capture_referral'], 10, 1);
         add_action('woocommerce_store_api_checkout_update_order_from_request', [__CLASS__, 'capture_referral'], 10, 1);
-        // Referral: RM10 off a referred NEW customer's first order.
-        add_action('woocommerce_cart_calculate_fees', [__CLASS__, 'referral_welcome_discount']);
+        // Club welcome offer: capture ?welcome=<signed token> into a 30-day cookie.
+        add_action('wp_footer', [__CLASS__, 'welcome_cookie_script']);
+        // First-order discount: the bigger of the Club welcome (RM30) or referral (RM10), never both.
+        add_action('woocommerce_cart_calculate_fees', [__CLASS__, 'first_order_discount']);
         register_activation_hook(__FILE__, 'flush_rewrite_rules');
         register_deactivation_hook(__FILE__, 'flush_rewrite_rules');
     }
@@ -145,25 +149,62 @@ final class Galado_Club_Bridge {
     }
 
     /**
-     * RM10 welcome discount for a referred NEW customer: galado_ref cookie present AND no
-     * prior paid orders. Applied as a negative cart fee so it shows on cart + checkout and
-     * flows into the order total (so the referrer's 10% is on what the friend actually paid).
-     * Existing customers never get it; a min subtotal protects margin.
+     * Club welcome offer — capture ?welcome=<signed token> into a 30-day first-party cookie.
+     * The token is minted per-member by the Club (HMAC over the shared SSO secret) so the RM30
+     * can't be faked or pasted around as a public promo. Reads the live URL so cached pages work.
      */
-    public static function referral_welcome_discount($cart) {
+    public static function welcome_cookie_script() {
+        if (is_admin()) {
+            return;
+        }
+        ?>
+<script>(function(){try{var w=new URLSearchParams(location.search).get('welcome');if(!w||!/^welcome\.[0-9]+\.[0-9]+\.[A-Za-z0-9_-]+$/.test(w))return;var e=new Date(Date.now()+2592e6).toUTCString();document.cookie='galado_welcome='+w+'; expires='+e+'; path=/; SameSite=Lax';}catch(e){}})();</script>
+<?php
+    }
+
+    /** Verify a Club-minted welcome token (welcome.<memberId>.<exp>.<base64url-hmac>). */
+    private static function verify_welcome_token($token) {
+        $secret = self::sso_secret();
+        if ('' === $secret || !$token) {
+            return false;
+        }
+        $parts = explode('.', (string) $token);
+        if (count($parts) !== 4 || 'welcome' !== $parts[0]) {
+            return false;
+        }
+        $payload = $parts[0] . '.' . $parts[1] . '.' . $parts[2];
+        $calc = rtrim(strtr(base64_encode(hash_hmac('sha256', $payload, $secret, true)), '+/', '-_'), '=');
+        if (!hash_equals($calc, $parts[3])) {
+            return false;
+        }
+        return (int) $parts[2] >= time();
+    }
+
+    /**
+     * First-order discount as a negative cart fee. A never-ordered shopper gets the BIGGER of:
+     *  - the Club welcome (RM30 off, min RM120) when a valid signed ?welcome token cookie is set, or
+     *  - the referral welcome (RM10 off, min RM30) when a ?ref cookie is set.
+     * Never both (no stacking). Existing customers get neither; the min subtotal protects margin.
+     * Applied as a negative fee so it shows on cart + checkout and flows into the order total
+     * (so a referrer's 10% is on what the friend actually paid).
+     */
+    public static function first_order_discount($cart) {
         if ((is_admin() && !defined('DOING_AJAX')) || !function_exists('WC')) {
-            return;
-        }
-        if (empty($_COOKIE['galado_ref'])) {
-            return;
-        }
-        if ((float) $cart->get_subtotal() < self::WELCOME_MIN) {
             return;
         }
         if (self::is_existing_customer()) {
             return;
         }
-        $cart->add_fee(__('Referral welcome — RM10 off your first order', 'galado-club'), -1 * self::WELCOME_AMOUNT, false);
+        $subtotal = (float) $cart->get_subtotal();
+        if (!empty($_COOKIE['galado_welcome'])
+            && self::verify_welcome_token(wp_unslash($_COOKIE['galado_welcome']))
+            && $subtotal >= self::WELCOME30_MIN) {
+            $cart->add_fee(__('GALADO Club welcome — RM30 off your first order', 'galado-club'), -1 * self::WELCOME30_AMOUNT, false);
+            return;
+        }
+        if (!empty($_COOKIE['galado_ref']) && $subtotal >= self::WELCOME_MIN) {
+            $cart->add_fee(__('Referral welcome — RM10 off your first order', 'galado-club'), -1 * self::WELCOME_AMOUNT, false);
+        }
     }
 
     /** True if this shopper has a prior paid order (logged-in, or guest matched by billing email). */
