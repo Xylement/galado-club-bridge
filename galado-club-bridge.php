@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.11.0
+ * Version: 0.12.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.11.0';
+    const VERSION  = '0.12.0';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -609,6 +609,15 @@ final class Galado_Club_Bridge {
                     ]);
                     if (is_wp_error($uid)) { $failed++; continue; }
                     update_user_meta($uid, 'galado_club_origin', 'club-backfill');
+                    // Points & Rewards grants signup points on the core user_register hook (fires for
+                    // ANY new user, even this bare insert). Zero out whatever it auto-awarded — a
+                    // backfilled account earns nothing until it places a real order.
+                    if (class_exists('WC_Points_Rewards_Manager')) {
+                        $bal = (int) WC_Points_Rewards_Manager::get_users_points($uid);
+                        if ($bal > 0) {
+                            WC_Points_Rewards_Manager::decrease_points($uid, $bal, 'galado-club-backfill');
+                        }
+                    }
                     $created++;
                 }
                 return ['ok' => true, 'dry_run' => $dry_run, 'created' => $created, 'exists' => $exists, 'failed' => $failed, 'count' => count($emails)];
