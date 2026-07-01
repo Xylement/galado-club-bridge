@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.10.0
+ * Version: 0.11.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.10.0';
+    const VERSION  = '0.11.0';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -580,7 +580,6 @@ final class Galado_Club_Bridge {
             'permission_callback' => [__CLASS__, 'bridge_auth'],
             'callback'            => function (WP_REST_Request $request) {
                 $emails  = $request->get_param('emails');
-                $silent  = filter_var($request->get_param('silent'), FILTER_VALIDATE_BOOLEAN);
                 $dry_run = filter_var($request->get_param('dry_run'), FILTER_VALIDATE_BOOLEAN);
                 if (!is_array($emails) || count($emails) === 0) {
                     return new WP_Error('bad_request', 'emails[] required', ['status' => 400]);
@@ -588,26 +587,29 @@ final class Galado_Club_Bridge {
                 if (count($emails) > 200) {
                     return new WP_Error('too_many', 'max 200 emails per call', ['status' => 400]);
                 }
-                if (!$dry_run && !function_exists('wc_create_new_customer')) {
-                    return new WP_Error('no_woocommerce', 'WooCommerce not active', ['status' => 501]);
-                }
-                // Suppress WooCommerce's "new account" email for the whole silent batch.
-                if ($silent && !$dry_run) {
-                    add_filter('woocommerce_email_enabled_customer_new_account', '__return_false', 999);
-                }
                 $created = 0; $exists = 0; $failed = 0;
                 foreach ($emails as $raw) {
                     $email = sanitize_email((string) $raw);
                     if (!$email || !is_email($email)) { $failed++; continue; }
                     if (email_exists($email)) { $exists++; continue; }
                     if ($dry_run) { $created++; continue; } // would-create (no write)
-                    $uid = wc_create_new_customer($email, '', '', []);
+                    // Bare wp_insert_user (role customer) — deliberately does NOT fire
+                    // woocommerce_created_customer, so a bulk backfill triggers NO signup
+                    // reward-points, NO Klaviyo push, and NO new-account email. These people
+                    // sync to Klaviyo/earn points only when they place a real order (unchanged).
+                    $local = sanitize_user(substr($email, 0, strpos($email, '@')), true);
+                    if ('' === $local) { $local = 'member'; }
+                    $username = $local; $n = 1;
+                    while (username_exists($username)) { $username = $local . '-' . (++$n); }
+                    $uid = wp_insert_user([
+                        'user_login' => $username,
+                        'user_email' => $email,
+                        'user_pass'  => wp_generate_password(24, true, true),
+                        'role'       => 'customer',
+                    ]);
                     if (is_wp_error($uid)) { $failed++; continue; }
                     update_user_meta($uid, 'galado_club_origin', 'club-backfill');
                     $created++;
-                }
-                if ($silent && !$dry_run) {
-                    remove_filter('woocommerce_email_enabled_customer_new_account', '__return_false', 999);
                 }
                 return ['ok' => true, 'dry_run' => $dry_run, 'created' => $created, 'exists' => $exists, 'failed' => $failed, 'count' => count($emails)];
             },
