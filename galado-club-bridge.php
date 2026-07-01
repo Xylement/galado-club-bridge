@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.8.0
+ * Version: 0.9.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.8.0';
+    const VERSION  = '0.9.0';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -35,6 +35,8 @@ final class Galado_Club_Bridge {
         add_action('woocommerce_account_dashboard', [__CLASS__, 'dashboard_card']);
         add_action('woocommerce_thankyou', [__CLASS__, 'thankyou_block']);
         add_action('rest_api_init', [__CLASS__, 'rest_routes']);
+        // Two-way account link: a new galado.com.my registration also creates the Club member.
+        add_action('user_register', [__CLASS__, 'on_user_register'], 20, 1);
         add_action('transition_comment_status', [__CLASS__, 'on_comment_transition'], 10, 3);
         add_action('comment_post', [__CLASS__, 'on_comment_post'], 10, 2);
         // Referral: capture ?ref= into a 30-day cookie, then stamp it onto the order at checkout.
@@ -65,6 +67,25 @@ final class Galado_Club_Bridge {
     public static function bridge_auth(WP_REST_Request $request) {
         $secret = self::bridge_secret();
         return '' !== $secret && hash_equals($secret, (string) $request->get_header('x-club-bridge-secret'));
+    }
+
+    /** New galado.com.my registration → mirror into the Club so a store signup is also a Club member. */
+    public static function on_user_register($user_id) {
+        $secret = self::bridge_secret();
+        if ('' === $secret) {
+            return;
+        }
+        $user  = get_userdata($user_id);
+        $email = $user ? $user->user_email : '';
+        if (!$email || !is_email($email)) {
+            return;
+        }
+        wp_remote_post(self::club_url() . '/webhooks/store-signup', [
+            'timeout'  => 4,
+            'blocking' => false, // fire-and-forget; the Club upsert is idempotent
+            'headers'  => ['content-type' => 'application/json', 'x-club-bridge-secret' => $secret],
+            'body'     => wp_json_encode(['email' => strtolower($email)]),
+        ]);
     }
 
     /** Review moderated from pending → approved. */
@@ -501,7 +522,7 @@ final class Galado_Club_Bridge {
             'methods'             => 'GET',
             'permission_callback' => '__return_true',
             'callback'            => function () {
-                return ['ok' => true, 'version' => self::VERSION, 'hooks' => ['transition_comment_status', 'comment_post', 'woocommerce_checkout_create_order', 'woocommerce_cart_calculate_fees']];
+                return ['ok' => true, 'version' => self::VERSION, 'hooks' => ['transition_comment_status', 'comment_post', 'woocommerce_checkout_create_order', 'woocommerce_cart_calculate_fees', 'user_register']];
             },
         ]);
         register_rest_route('galado-club/v1', '/tier', [
@@ -519,6 +540,35 @@ final class Galado_Club_Bridge {
                 }
                 update_user_meta($wp_user->ID, 'galado_club_tier', $tier);
                 return ['ok' => true, 'user_id' => $wp_user->ID, 'tier' => $tier];
+            },
+        ]);
+
+        // Club -> WP: create a native WooCommerce customer for a Club member who signed up on the
+        // Club, so they also have a store login. Idempotent (no-op if the email already exists);
+        // WooCommerce sends its own new-account / set-password email.
+        register_rest_route('galado-club/v1', '/provision-customer', [
+            'methods'             => 'POST',
+            'permission_callback' => [__CLASS__, 'bridge_auth'],
+            'callback'            => function (WP_REST_Request $request) {
+                $email = sanitize_email((string) $request->get_param('email'));
+                if (!$email || !is_email($email)) {
+                    return new WP_Error('bad_request', 'a valid email is required', ['status' => 400]);
+                }
+                $existing = email_exists($email);
+                if ($existing) {
+                    return ['ok' => true, 'status' => 'exists', 'user_id' => (int) $existing];
+                }
+                if (!function_exists('wc_create_new_customer')) {
+                    return new WP_Error('no_woocommerce', 'WooCommerce not active', ['status' => 501]);
+                }
+                // Empty password → WooCommerce follows the store's registration setting (generates
+                // one or emails a set-password link) and sends the new-account email.
+                $user_id = wc_create_new_customer($email, '', '', []);
+                if (is_wp_error($user_id)) {
+                    return new WP_Error('create_failed', $user_id->get_error_message(), ['status' => 409]);
+                }
+                update_user_meta($user_id, 'galado_club_origin', 'club');
+                return ['ok' => true, 'status' => 'created', 'user_id' => (int) $user_id];
             },
         ]);
 
