@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.9.0
+ * Version: 0.10.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.9.0';
+    const VERSION  = '0.10.0';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -569,6 +569,47 @@ final class Galado_Club_Bridge {
                 }
                 update_user_meta($user_id, 'galado_club_origin', 'club');
                 return ['ok' => true, 'status' => 'created', 'user_id' => (int) $user_id];
+            },
+        ]);
+
+        // Club -> WP: BULK provision for the one-time backfill of Club-only members. Up to 200
+        // emails per call. `silent` suppresses the WooCommerce new-account email; `dry_run` only
+        // counts (email_exists check, no writes) so we can measure how many accounts a run creates.
+        register_rest_route('galado-club/v1', '/provision-customers', [
+            'methods'             => 'POST',
+            'permission_callback' => [__CLASS__, 'bridge_auth'],
+            'callback'            => function (WP_REST_Request $request) {
+                $emails  = $request->get_param('emails');
+                $silent  = filter_var($request->get_param('silent'), FILTER_VALIDATE_BOOLEAN);
+                $dry_run = filter_var($request->get_param('dry_run'), FILTER_VALIDATE_BOOLEAN);
+                if (!is_array($emails) || count($emails) === 0) {
+                    return new WP_Error('bad_request', 'emails[] required', ['status' => 400]);
+                }
+                if (count($emails) > 200) {
+                    return new WP_Error('too_many', 'max 200 emails per call', ['status' => 400]);
+                }
+                if (!$dry_run && !function_exists('wc_create_new_customer')) {
+                    return new WP_Error('no_woocommerce', 'WooCommerce not active', ['status' => 501]);
+                }
+                // Suppress WooCommerce's "new account" email for the whole silent batch.
+                if ($silent && !$dry_run) {
+                    add_filter('woocommerce_email_enabled_customer_new_account', '__return_false', 999);
+                }
+                $created = 0; $exists = 0; $failed = 0;
+                foreach ($emails as $raw) {
+                    $email = sanitize_email((string) $raw);
+                    if (!$email || !is_email($email)) { $failed++; continue; }
+                    if (email_exists($email)) { $exists++; continue; }
+                    if ($dry_run) { $created++; continue; } // would-create (no write)
+                    $uid = wc_create_new_customer($email, '', '', []);
+                    if (is_wp_error($uid)) { $failed++; continue; }
+                    update_user_meta($uid, 'galado_club_origin', 'club-backfill');
+                    $created++;
+                }
+                if ($silent && !$dry_run) {
+                    remove_filter('woocommerce_email_enabled_customer_new_account', '__return_false', 999);
+                }
+                return ['ok' => true, 'dry_run' => $dry_run, 'created' => $created, 'exists' => $exists, 'failed' => $failed, 'count' => count($emails)];
             },
         ]);
 
