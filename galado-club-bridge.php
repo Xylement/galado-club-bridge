@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.14.2
+ * Version: 0.14.3
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.14.2';
+    const VERSION  = '0.14.3';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -62,6 +62,10 @@ final class Galado_Club_Bridge {
             add_filter('woocommerce_email_enabled_' . $pos_email_id, [__CLASS__, 'pos_suppress_email'], 10, 2);
         }
         add_filter('woocommerce_webhook_should_deliver', [__CLASS__, 'pos_filter_webhook'], 10, 3);
+        // In-store receipt emails read like a receipt, not a shipping confirmation.
+        add_filter('woocommerce_email_subject_customer_completed_order', [__CLASS__, 'pos_email_subject'], 10, 2);
+        add_filter('woocommerce_email_heading_customer_completed_order', [__CLASS__, 'pos_email_heading'], 10, 2);
+        add_action('woocommerce_email_before_order_table', [__CLASS__, 'pos_email_intro'], 10, 4);
         // The "Hide Checkout Shipping Address" plugin fatals on any programmatic order
         // creation (its woocommerce_new_order handler reads WC_Checkout->shipping_method,
         // which calls WC()->session->get() — null outside a real browser checkout). Detach
@@ -107,6 +111,31 @@ final class Galado_Club_Bridge {
         }
         self::$pos_email_override = false;
         return ['ok' => true, 'sent_to' => $order->get_billing_email()];
+    }
+
+    public static function pos_email_subject($subject, $order = null) {
+        return self::is_pos_order($order) ? 'Your GALADO receipt' : $subject;
+    }
+
+    public static function pos_email_heading($heading, $order = null) {
+        return self::is_pos_order($order) ? 'Thanks for shopping with us!' : $heading;
+    }
+
+    public static function pos_email_intro($order, $sent_to_admin = false, $plain_text = false, $email = null) {
+        if ($sent_to_admin || !self::is_pos_order($order)) {
+            return;
+        }
+        if (!is_object($email) || 'customer_completed_order' !== $email->id) {
+            return;
+        }
+        $text = 'It was lovely having you at the store today — here is your receipt, safe in your inbox. '
+              . 'It also works as your proof of purchase for warranty, so no need to keep a paper slip. '
+              . 'Good news: this purchase earned you Shopping Credits — see them anytime at club.galado.com.my.';
+        if ($plain_text) {
+            echo $text . "\n\n";
+        } else {
+            echo '<p style="margin:0 0 16px;">' . esc_html($text) . '</p>';
+        }
     }
 
     public static function pos_guard_hcsa() {
