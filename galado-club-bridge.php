@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.13.1';
+    const VERSION  = '0.13.2';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -48,10 +48,10 @@ final class Galado_Club_Bridge {
         // First-order discount: the bigger of the Club welcome (RM30) or referral (RM10), never both.
         add_action('woocommerce_cart_calculate_fees', [__CLASS__, 'first_order_discount']);
         // POS (pos.galado.com.my) orders carry _pos_order meta: the sale happened at the
-        // counter, so suppress WooCommerce transactional emails and keep the order out of
+        // counter, so suppress WooCommerce CUSTOMER emails and keep the order out of
         // Klaviyo (flows like post-purchase would otherwise fire on walk-in sales).
+        // The admin "New order" email deliberately still fires — inbox paper trail.
         foreach ([
-            'new_order',
             'customer_processing_order',
             'customer_completed_order',
             'customer_on_hold_order',
