@@ -81,7 +81,7 @@ final class Galado_Club_Bridge {
 
     public static function pos_guard_hcsa() {
         if (function_exists('WC') && null === WC()->session && function_exists('wc_hcsa_adjust_order_shipping_fields')) {
-            remove_action('woocommerce_new_order', 'wc_hcsa_adjust_order_shipping_fields', 10);
+            remove_action('woocommerce_new_order', 'wc_hcsa_adjust_order_shipping_fields', 99);
         }
     }
 
