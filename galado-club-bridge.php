@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.14.3
+ * Version: 0.15.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.14.3';
+    const VERSION  = '0.15.0';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -781,6 +781,27 @@ final class Galado_Club_Bridge {
                 }
                 WC_Points_Rewards_Manager::decrease_points($wp_user->ID, $points, 'galado-club-conversion');
                 return ['ok' => true, 'deducted' => $points, 'balance' => (int) WC_Points_Rewards_Manager::get_users_points($wp_user->ID)];
+            },
+        ]);
+
+        // Rewards: lifetime points EARNED (positive log entries) — drives the milestone ladder.
+        register_rest_route('galado-club/v1', '/points/lifetime', [
+            'methods'             => 'POST',
+            'permission_callback' => [__CLASS__, 'bridge_auth'],
+            'callback'            => function (WP_REST_Request $request) {
+                global $wpdb;
+                $email   = sanitize_email((string) $request->get_param('email'));
+                $wp_user = $email ? get_user_by('email', $email) : false;
+                if (!$wp_user) {
+                    return ['lifetime' => 0, 'balance' => 0, 'has_account' => false];
+                }
+                $t = $wpdb->prefix . 'wc_points_rewards_user_points_log';
+                $lifetime = (int) $wpdb->get_var($wpdb->prepare(
+                    "SELECT COALESCE(SUM(points),0) FROM $t WHERE user_id = %d AND points > 0", $wp_user->ID
+                ));
+                $balance = class_exists('WC_Points_Rewards_Manager')
+                    ? (int) WC_Points_Rewards_Manager::get_users_points($wp_user->ID) : 0;
+                return ['lifetime' => $lifetime, 'balance' => $balance, 'has_account' => true];
             },
         ]);
 
