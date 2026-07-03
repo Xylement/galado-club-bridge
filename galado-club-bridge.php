@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.13.2
+ * Version: 0.13.3
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -440,15 +440,15 @@ final class Galado_Club_Bridge {
     }
 
     /** Shared Club panel (portrait + tier + coins + Enter button) for a logged-in user. */
-    /** Load the Club app's fonts (Baloo 2 + Nunito) so the cards match the Club, not the store theme. */
+    /** Load the brand fonts (Archivo + Inter) so the cards match Brand Guidelines v1.0. */
     private static function club_font_link() {
-        return '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;700;800&family=Nunito:wght@400;600;700&display=swap">';
+        return '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@700;800&family=Inter:wght@400;600&display=swap">';
     }
 
     /** Coral pill CTA matching the Club app buttons (avoids the store theme's square .button). */
     private static function cta_pill($url, $label) {
-        return '<a href="' . esc_url($url) . '" style="display:inline-block;background:#ff7a59;color:#fff;'
-            . "font-family:'Baloo 2',sans-serif;font-weight:700;font-size:16px;line-height:1;text-decoration:none;"
+        return '<a href="' . esc_url($url) . '" style="display:inline-block;background:#111111;color:#fff;'
+            . "font-family:'Archivo',sans-serif;font-weight:700;font-size:15px;line-height:1;text-decoration:none;"
             . 'padding:14px 30px;border-radius:999px;">' . esc_html($label) . ' &rarr;</a>';
     }
 
@@ -464,8 +464,8 @@ final class Galado_Club_Bridge {
         $enter_url = $token ? self::club_url() . '/sso?token=' . rawurlencode($token) : self::club_url();
 
         echo self::club_font_link();
-        echo '<div style="border:1px solid #f3ddd2;border-radius:20px;padding:24px;background:#fff9f4;font-family:\'Nunito\',sans-serif;color:#3a2a22;">';
-        echo '<h3 style="margin-top:0;font-family:\'Baloo 2\',sans-serif;font-weight:800;color:#3a2a22;">' . esc_html($heading) . '</h3>';
+        echo '<div style="border:1px solid #ECECEA;border-radius:20px;padding:24px;background:#FFFFFF;font-family:\'Inter\',sans-serif;color:#111111;box-shadow:0 4px 16px rgba(17,17,17,.06);">';
+        echo '<h3 style="margin-top:0;font-family:\'Archivo\',sans-serif;font-weight:800;color:#111111;letter-spacing:-.02em;">' . esc_html($heading) . '</h3>';
 
         if ($summary) {
             $coins = isset($summary['coins']) ? (int) $summary['coins'] : 0;
@@ -476,10 +476,10 @@ final class Galado_Club_Bridge {
             echo '<p style="margin:0 0 6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">'
                 . self::tier_pill(isset($summary['tier']) ? $summary['tier'] : 'silver')
                 . '<span style="opacity:.7;">member</span></p>';
-            echo '<p style="margin:0 0 12px;">' . esc_html(number_format_i18n($coins)) . ' G-Coins ready to spend &mdash; dress up your Buddy &amp; join The Lounge.</p>';
+            echo '<p style="margin:0 0 12px;">' . esc_html(number_format_i18n($coins)) . ' G-Coins ready to spend. Dress up your Buddy and join The Lounge.</p>';
             echo '</div></div>';
         } else {
-            echo '<p>Your coins, badges and avatar are waiting &mdash; every GALADO order earns G-Coins.</p>';
+            echo '<p>Your coins, badges and avatar are waiting: every GALADO order earns G-Coins.</p>';
         }
 
         echo '<p style="margin:14px 0 0;">' . self::cta_pill($enter_url, 'Enter the Club') . '</p>';
@@ -532,8 +532,8 @@ final class Galado_Club_Bridge {
         $coins_est = (int) round($net * (isset($mult[$tier]) ? $mult[$tier] : 1.0));
         $earned    = $coins_est >= 1;
 
-        echo '<section style="border:1px solid #f3ddd2;border-radius:20px;padding:24px;background:#fff9f4;margin:24px 0;font-family:\'Nunito\',sans-serif;color:#3a2a22;">';
-        $hstyle = "margin-top:0;font-family:'Baloo 2',sans-serif;font-weight:800;color:#d85a30;";
+        echo '<section style="border:1px solid #ECECEA;border-radius:20px;padding:24px;background:#FFFFFF;margin:24px 0;font-family:\'Inter\',sans-serif;color:#111111;box-shadow:0 4px 16px rgba(17,17,17,.06);">';
+        $hstyle = "margin-top:0;font-family:'Archivo',sans-serif;font-weight:800;color:#111111;letter-spacing:-.02em;";
         if ($earned) {
             echo '<h2 style="' . $hstyle . '">' . self::coin_icon() . 'You just earned ~' . esc_html(number_format_i18n($coins_est)) . ' G-Coins!</h2>';
             echo '<p style="margin:0 0 12px;">Spend them on looks, dress up your little Buddy, and climb the leaderboard in GALADO Club.</p>';
@@ -553,7 +553,7 @@ final class Galado_Club_Bridge {
             $email = $order->get_billing_email();
             echo '<p style="margin:0 0 14px;">Create your free GALADO Club account' . ($earned ? ' to claim them' : '');
             if ($email) {
-                echo ' &mdash; sign in with <strong>' . esc_html($email) . '</strong>';
+                echo ', sign in with <strong>' . esc_html($email) . '</strong>';
             }
             echo '.</p>';
             echo self::cta_pill(self::club_url(), $earned ? 'Claim my G-Coins' : 'Join GALADO Club');
