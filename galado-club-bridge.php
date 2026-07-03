@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.13.3
+ * Version: 0.14.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.13.2';
+    const VERSION  = '0.14.0';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -744,6 +744,56 @@ final class Galado_Club_Bridge {
                 }
                 WC_Points_Rewards_Manager::increase_points($wp_user->ID, $points, 'galado-pos-credit');
                 return ['ok' => true, 'added' => $points, 'balance' => (int) WC_Points_Rewards_Manager::get_users_points($wp_user->ID)];
+            },
+        ]);
+
+        // POS -> WP: the WCPA customization fields assigned to a product (normalized).
+        // Lets the POS render the same Name/Font/Colour/Photo options the web product page has.
+        register_rest_route('galado-club/v1', '/product-form', [
+            'methods'             => 'POST',
+            'permission_callback' => [__CLASS__, 'bridge_auth'],
+            'callback'            => function (WP_REST_Request $request) {
+                $product_id = absint($request->get_param('product_id'));
+                if (!$product_id) {
+                    return new WP_Error('bad_request', 'product_id required', ['status' => 400]);
+                }
+                $form_ids = get_post_meta($product_id, '_wcpa_product_meta', true);
+                if (!is_array($form_ids) || !count($form_ids)) {
+                    return ['fields' => []];
+                }
+                $fields = [];
+                foreach ($form_ids as $fid) {
+                    $data = get_post_meta((int) $fid, '_wcpa_fb-editor-data', true);
+                    $defs = is_string($data) ? json_decode($data, true) : $data;
+                    if (!is_array($defs)) { continue; }
+                    foreach ($defs as $f) {
+                        $type = (string) ($f['type'] ?? '');
+                        if (!in_array($type, ['text', 'textarea', 'select', 'radio-group', 'checkbox-group', 'color-group', 'image-group', 'file'], true)) {
+                            continue;
+                        }
+                        $options = [];
+                        foreach ((array) ($f['values'] ?? []) as $i => $v) {
+                            $options[] = [
+                                'label' => (string) ($v['label'] ?? ''),
+                                'value' => (string) ($v['value'] ?? ($v['label'] ?? ('option-' . ($i + 1)))),
+                                'color' => (string) ($v['color'] ?? ''),
+                                'image' => (string) ($v['image'] ?? ''),
+                            ];
+                        }
+                        $fields[] = [
+                            'form_id'     => (int) $fid,
+                            'type'        => $type,
+                            'name'        => (string) ($f['name'] ?? ''),
+                            'label'       => (string) ($f['label'] ?? ''),
+                            'description' => (string) ($f['description'] ?? ''),
+                            'placeholder' => (string) ($f['placeholder'] ?? ''),
+                            'maxlength'   => (int) ($f['maxlength'] ?? 0),
+                            'required'    => !empty($f['required']),
+                            'options'     => $options,
+                        ];
+                    }
+                }
+                return ['fields' => $fields];
             },
         ]);
 
