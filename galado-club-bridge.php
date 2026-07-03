@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.14.1
+ * Version: 0.14.2
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.14.1';
+    const VERSION  = '0.14.2';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -75,8 +75,38 @@ final class Galado_Club_Bridge {
         return $order instanceof WC_Order && '1' === (string) $order->get_meta('_pos_order');
     }
 
+    /** True while the POS is deliberately sending an email receipt for a POS order. */
+    private static $pos_email_override = false;
+
     public static function pos_suppress_email($enabled, $order = null) {
+        if (self::$pos_email_override) {
+            return $enabled;
+        }
         return self::is_pos_order($order) ? false : $enabled;
+    }
+
+    /** POS -> WP: send the native Woo order email as a paperless receipt (explicit, per order). */
+    public static function pos_send_order_email(WP_REST_Request $request) {
+        $order_id = absint($request->get_param('order_id'));
+        $email    = sanitize_email((string) $request->get_param('email'));
+        $order    = $order_id ? wc_get_order($order_id) : false;
+        if (!$order) {
+            return new WP_Error('not_found', 'no such order', ['status' => 404]);
+        }
+        if ($email && is_email($email)) {
+            $order->set_billing_email($email);
+            $order->save();
+        }
+        if (!$order->get_billing_email()) {
+            return new WP_Error('no_email', 'order has no email — provide one', ['status' => 400]);
+        }
+        self::$pos_email_override = true;
+        $emails = WC()->mailer()->get_emails();
+        if (isset($emails['WC_Email_Customer_Completed_Order'])) {
+            $emails['WC_Email_Customer_Completed_Order']->trigger($order_id);
+        }
+        self::$pos_email_override = false;
+        return ['ok' => true, 'sent_to' => $order->get_billing_email()];
     }
 
     public static function pos_guard_hcsa() {
@@ -796,6 +826,12 @@ final class Galado_Club_Bridge {
                 }
                 return ['fields' => $fields];
             },
+        ]);
+
+        register_rest_route('galado-club/v1', '/order-email', [
+            'methods'             => 'POST',
+            'permission_callback' => [__CLASS__, 'bridge_auth'],
+            'callback'            => [__CLASS__, 'pos_send_order_email'],
         ]);
 
         // POS -> WP: find customers by phone / email / name (walk-in member lookup).
