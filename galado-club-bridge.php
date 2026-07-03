@@ -369,7 +369,7 @@ final class Galado_Club_Bridge {
         $key    = isset($grad[$tier]) ? $tier : 'silver';
         $extra  = 'black' === $key ? 'box-shadow:inset 0 0 0 1.5px #ffe9a8;' : '';
         return '<span style="display:inline-block;background:' . $grad[$key] . ';color:#fff;'
-            . "font-family:'Baloo 2',sans-serif;font-weight:800;font-size:12px;letter-spacing:.04em;text-transform:uppercase;"
+            . "font-family:'Archivo',sans-serif;font-weight:700;font-size:11px;letter-spacing:.08em;text-transform:uppercase;"
             . 'padding:5px 13px;border-radius:999px;' . $extra . '">' . esc_html($labels[$key]) . '</span>';
     }
 
