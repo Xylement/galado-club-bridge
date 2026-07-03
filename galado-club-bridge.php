@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.12.0
+ * Version: 0.13.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.12.0';
+    const VERSION  = '0.13.0';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -47,8 +47,43 @@ final class Galado_Club_Bridge {
         add_action('wp_footer', [__CLASS__, 'welcome_cookie_script']);
         // First-order discount: the bigger of the Club welcome (RM30) or referral (RM10), never both.
         add_action('woocommerce_cart_calculate_fees', [__CLASS__, 'first_order_discount']);
+        // POS (pos.galado.com.my) orders carry _pos_order meta: the sale happened at the
+        // counter, so suppress WooCommerce transactional emails and keep the order out of
+        // Klaviyo (flows like post-purchase would otherwise fire on walk-in sales).
+        foreach ([
+            'new_order',
+            'customer_processing_order',
+            'customer_completed_order',
+            'customer_on_hold_order',
+            'customer_invoice',
+            'customer_refunded_order',
+            'customer_partially_refunded_order',
+        ] as $pos_email_id) {
+            add_filter('woocommerce_email_enabled_' . $pos_email_id, [__CLASS__, 'pos_suppress_email'], 10, 2);
+        }
+        add_filter('woocommerce_webhook_should_deliver', [__CLASS__, 'pos_filter_webhook'], 10, 3);
         register_activation_hook(__FILE__, 'flush_rewrite_rules');
         register_deactivation_hook(__FILE__, 'flush_rewrite_rules');
+    }
+
+    private static function is_pos_order($order) {
+        return $order instanceof WC_Order && '1' === (string) $order->get_meta('_pos_order');
+    }
+
+    public static function pos_suppress_email($enabled, $order = null) {
+        return self::is_pos_order($order) ? false : $enabled;
+    }
+
+    /** Keep POS orders out of Klaviyo's order webhook; every other webhook (incl. the Club's) still fires. */
+    public static function pos_filter_webhook($should_deliver, $webhook, $arg) {
+        if (!$should_deliver || !is_object($webhook) || false === strpos((string) $webhook->get_delivery_url(), 'klaviyo.com')) {
+            return $should_deliver;
+        }
+        if (0 !== strpos((string) $webhook->get_topic(), 'order.')) {
+            return $should_deliver;
+        }
+        $order = is_numeric($arg) ? wc_get_order((int) $arg) : null;
+        return self::is_pos_order($order) ? false : $should_deliver;
     }
 
     private static function club_url() {
@@ -568,6 +603,18 @@ final class Galado_Club_Bridge {
                     return new WP_Error('create_failed', $user_id->get_error_message(), ['status' => 409]);
                 }
                 update_user_meta($user_id, 'galado_club_origin', 'club');
+                // Optional profile details (used by POS walk-in signups).
+                $first = sanitize_text_field((string) $request->get_param('first_name'));
+                $last  = sanitize_text_field((string) $request->get_param('last_name'));
+                $phone = sanitize_text_field((string) $request->get_param('phone'));
+                if ($first || $last) {
+                    wp_update_user(['ID' => $user_id, 'first_name' => $first, 'last_name' => $last, 'display_name' => trim("$first $last")]);
+                    update_user_meta($user_id, 'billing_first_name', $first);
+                    update_user_meta($user_id, 'billing_last_name', $last);
+                }
+                if ($phone) {
+                    update_user_meta($user_id, 'billing_phone', $phone);
+                }
                 return ['ok' => true, 'status' => 'created', 'user_id' => (int) $user_id];
             },
         ]);
@@ -664,6 +711,82 @@ final class Galado_Club_Bridge {
                 }
                 WC_Points_Rewards_Manager::decrease_points($wp_user->ID, $points, 'galado-club-conversion');
                 return ['ok' => true, 'deducted' => $points, 'balance' => (int) WC_Points_Rewards_Manager::get_users_points($wp_user->ID)];
+            },
+        ]);
+
+        // POS -> WP: credit Shopping Credits (Points & Rewards) into a member's account.
+        register_rest_route('galado-club/v1', '/points/add', [
+            'methods'             => 'POST',
+            'permission_callback' => [__CLASS__, 'bridge_auth'],
+            'callback'            => function (WP_REST_Request $request) {
+                if (!class_exists('WC_Points_Rewards_Manager')) {
+                    return new WP_Error('no_points_plugin', 'Points & Rewards not active', ['status' => 501]);
+                }
+                $email  = sanitize_email((string) $request->get_param('email'));
+                $points = absint($request->get_param('points'));
+                if (!$email || $points < 1 || $points > 200000) {
+                    return new WP_Error('bad_request', 'email and positive points required', ['status' => 400]);
+                }
+                $wp_user = get_user_by('email', $email);
+                if (!$wp_user) {
+                    return new WP_Error('not_found', 'no user with that email', ['status' => 404]);
+                }
+                WC_Points_Rewards_Manager::increase_points($wp_user->ID, $points, 'galado-pos-credit');
+                return ['ok' => true, 'added' => $points, 'balance' => (int) WC_Points_Rewards_Manager::get_users_points($wp_user->ID)];
+            },
+        ]);
+
+        // POS -> WP: find customers by phone / email / name (walk-in member lookup).
+        register_rest_route('galado-club/v1', '/customer-search', [
+            'methods'             => 'POST',
+            'permission_callback' => [__CLASS__, 'bridge_auth'],
+            'callback'            => function (WP_REST_Request $request) {
+                global $wpdb;
+                $q = trim((string) $request->get_param('q'));
+                if (strlen($q) < 3) {
+                    return new WP_Error('bad_request', 'query too short', ['status' => 400]);
+                }
+                $digits = preg_replace('/\D+/', '', $q);
+                $ids = [];
+                if (strlen($digits) >= 6 && strlen($digits) >= strlen($q) - 4) {
+                    // Mostly-numeric query → phone lookup. Match loosely on the trailing digits
+                    // so 0123456789 / +60123456789 / 012-345 6789 all hit the same row.
+                    $tail = substr($digits, -8);
+                    $ids = $wpdb->get_col($wpdb->prepare(
+                        "SELECT user_id FROM {$wpdb->usermeta}
+                          WHERE meta_key = 'billing_phone'
+                            AND REPLACE(REPLACE(REPLACE(REPLACE(meta_value,' ',''),'-',''),'+',''),'.','') LIKE %s
+                          LIMIT 10",
+                        '%' . $wpdb->esc_like($tail)
+                    ));
+                } else {
+                    $like = '%' . $wpdb->esc_like($q) . '%';
+                    $ids = $wpdb->get_col($wpdb->prepare(
+                        "SELECT DISTINCT u.ID FROM {$wpdb->users} u
+                           LEFT JOIN {$wpdb->usermeta} m ON m.user_id = u.ID
+                                 AND m.meta_key IN ('billing_first_name','billing_last_name','first_name','last_name')
+                          WHERE u.user_email LIKE %s OR u.display_name LIKE %s OR m.meta_value LIKE %s
+                          LIMIT 10",
+                        $like, $like, $like
+                    ));
+                }
+                $out = [];
+                foreach (array_slice(array_unique(array_map('intval', $ids)), 0, 10) as $uid) {
+                    $u = get_userdata($uid);
+                    if (!$u) { continue; }
+                    $first = get_user_meta($uid, 'billing_first_name', true) ?: get_user_meta($uid, 'first_name', true);
+                    $last  = get_user_meta($uid, 'billing_last_name', true) ?: get_user_meta($uid, 'last_name', true);
+                    $name  = trim("$first $last") ?: $u->display_name;
+                    $out[] = [
+                        'user_id' => $uid,
+                        'email'   => $u->user_email,
+                        'name'    => $name,
+                        'phone'   => (string) get_user_meta($uid, 'billing_phone', true),
+                        'points'  => class_exists('WC_Points_Rewards_Manager') ? (int) WC_Points_Rewards_Manager::get_users_points($uid) : 0,
+                        'tier'    => (string) get_user_meta($uid, 'galado_club_tier', true),
+                    ];
+                }
+                return ['customers' => $out];
             },
         ]);
     }
