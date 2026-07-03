@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.13.0
+ * Version: 0.13.1
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.13.0';
+    const VERSION  = '0.13.1';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -62,6 +62,11 @@ final class Galado_Club_Bridge {
             add_filter('woocommerce_email_enabled_' . $pos_email_id, [__CLASS__, 'pos_suppress_email'], 10, 2);
         }
         add_filter('woocommerce_webhook_should_deliver', [__CLASS__, 'pos_filter_webhook'], 10, 3);
+        // The "Hide Checkout Shipping Address" plugin fatals on any programmatic order
+        // creation (its woocommerce_new_order handler reads WC_Checkout->shipping_method,
+        // which calls WC()->session->get() — null outside a real browser checkout). Detach
+        // it just-in-time when there is no session; real checkouts are unaffected.
+        add_action('woocommerce_new_order', [__CLASS__, 'pos_guard_hcsa'], 1);
         register_activation_hook(__FILE__, 'flush_rewrite_rules');
         register_deactivation_hook(__FILE__, 'flush_rewrite_rules');
     }
@@ -72,6 +77,12 @@ final class Galado_Club_Bridge {
 
     public static function pos_suppress_email($enabled, $order = null) {
         return self::is_pos_order($order) ? false : $enabled;
+    }
+
+    public static function pos_guard_hcsa() {
+        if (function_exists('WC') && null === WC()->session && function_exists('wc_hcsa_adjust_order_shipping_fields')) {
+            remove_action('woocommerce_new_order', 'wc_hcsa_adjust_order_shipping_fields', 10);
+        }
     }
 
     /** Keep POS orders out of Klaviyo's order webhook; every other webhook (incl. the Club's) still fires. */
