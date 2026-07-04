@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.15.1
+ * Version: 0.15.2
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.15.1';
+    const VERSION  = '0.15.2';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -62,11 +62,12 @@ final class Galado_Club_Bridge {
             add_filter('woocommerce_email_enabled_' . $pos_email_id, [__CLASS__, 'pos_suppress_email'], 10, 2);
         }
         add_filter('woocommerce_webhook_should_deliver', [__CLASS__, 'pos_filter_webhook'], 10, 3);
-        // Greet the "new account" email by the customer's name, not the auto-generated
-        // username (email local part). Scoped to that one email so order emails — which
-        // already greet by the correct billing name — are never touched.
-        add_action('woocommerce_email_header', [__CLASS__, 'new_account_greeting_on'], 10, 2);
-        add_action('woocommerce_email_footer', [__CLASS__, 'new_account_greeting_off'], 10, 1);
+        // The WooCommerce "new account" email addresses the customer only by their
+        // auto-generated username (email local part, e.g. "layhar78"). Inject a warm
+        // "Hi <name>," greeting at the top of that email's body so it opens with the name
+        // the customer entered. Priority 20 runs after WC's header render, so the greeting
+        // lands just under the heading; scoped to this one email — order emails untouched.
+        add_action('woocommerce_email_header', [__CLASS__, 'new_account_greeting'], 20, 2);
         // In-store receipt emails read like a receipt, not a shipping confirmation.
         add_filter('woocommerce_email_subject_customer_completed_order', [__CLASS__, 'pos_email_subject'], 10, 2);
         add_filter('woocommerce_email_heading_customer_completed_order', [__CLASS__, 'pos_email_heading'], 10, 2);
@@ -143,10 +144,8 @@ final class Galado_Club_Bridge {
         }
     }
 
-    /** Holds the greeting name only while the new-account email body renders. */
-    private static $new_account_greet_name = null;
-
-    public static function new_account_greeting_on($email_heading, $email = null) {
+    /** Echo a "Hi <name>," line at the top of the new-account email body. */
+    public static function new_account_greeting($email_heading, $email = null) {
         if (!is_object($email) || 'customer_new_account' !== $email->id) {
             return;
         }
@@ -157,26 +156,11 @@ final class Galado_Club_Bridge {
         $first = get_user_meta($user->ID, 'first_name', true);
         $name  = $first !== '' ? $first
                : (($user->display_name && $user->display_name !== $user->user_login) ? $user->display_name : '');
-        if ('' === trim((string) $name)) {
-            return; // no real name on file → leave WooCommerce's default (username)
+        $name  = trim((string) $name);
+        if ('' === $name) {
+            return; // no real name on file → leave WooCommerce's default wording
         }
-        self::$new_account_greet_name = trim((string) $name);
-        add_filter('gettext', [__CLASS__, 'new_account_greeting_filter'], 10, 3);
-    }
-
-    public static function new_account_greeting_off($email = null) {
-        remove_filter('gettext', [__CLASS__, 'new_account_greeting_filter'], 10);
-        self::$new_account_greet_name = null;
-    }
-
-    public static function new_account_greeting_filter($translated, $text, $domain) {
-        if ('woocommerce' === $domain && 'Hi %s,' === $text && null !== self::$new_account_greet_name) {
-            // The template runs this string through printf() with the username as the arg;
-            // dropping the %s makes printf ignore it, and %→%% keeps a stray % in a name
-            // (rare) from being read as a format directive.
-            return 'Hi ' . str_replace('%', '%%', self::$new_account_greet_name) . ',';
-        }
-        return $translated;
+        echo '<p style="margin:0 0 16px;">' . esc_html('Hi ' . $name . ',') . '</p>';
     }
 
     public static function pos_guard_hcsa() {
