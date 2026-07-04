@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.15.0
+ * Version: 0.15.1
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.15.0';
+    const VERSION  = '0.15.1';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -62,6 +62,11 @@ final class Galado_Club_Bridge {
             add_filter('woocommerce_email_enabled_' . $pos_email_id, [__CLASS__, 'pos_suppress_email'], 10, 2);
         }
         add_filter('woocommerce_webhook_should_deliver', [__CLASS__, 'pos_filter_webhook'], 10, 3);
+        // Greet the "new account" email by the customer's name, not the auto-generated
+        // username (email local part). Scoped to that one email so order emails — which
+        // already greet by the correct billing name — are never touched.
+        add_action('woocommerce_email_header', [__CLASS__, 'new_account_greeting_on'], 10, 2);
+        add_action('woocommerce_email_footer', [__CLASS__, 'new_account_greeting_off'], 10, 1);
         // In-store receipt emails read like a receipt, not a shipping confirmation.
         add_filter('woocommerce_email_subject_customer_completed_order', [__CLASS__, 'pos_email_subject'], 10, 2);
         add_filter('woocommerce_email_heading_customer_completed_order', [__CLASS__, 'pos_email_heading'], 10, 2);
@@ -136,6 +141,42 @@ final class Galado_Club_Bridge {
         } else {
             echo '<p style="margin:0 0 16px;">' . esc_html($text) . '</p>';
         }
+    }
+
+    /** Holds the greeting name only while the new-account email body renders. */
+    private static $new_account_greet_name = null;
+
+    public static function new_account_greeting_on($email_heading, $email = null) {
+        if (!is_object($email) || 'customer_new_account' !== $email->id) {
+            return;
+        }
+        $user = $email->object;
+        if (!($user instanceof WP_User)) {
+            return;
+        }
+        $first = get_user_meta($user->ID, 'first_name', true);
+        $name  = $first !== '' ? $first
+               : (($user->display_name && $user->display_name !== $user->user_login) ? $user->display_name : '');
+        if ('' === trim((string) $name)) {
+            return; // no real name on file → leave WooCommerce's default (username)
+        }
+        self::$new_account_greet_name = trim((string) $name);
+        add_filter('gettext', [__CLASS__, 'new_account_greeting_filter'], 10, 3);
+    }
+
+    public static function new_account_greeting_off($email = null) {
+        remove_filter('gettext', [__CLASS__, 'new_account_greeting_filter'], 10);
+        self::$new_account_greet_name = null;
+    }
+
+    public static function new_account_greeting_filter($translated, $text, $domain) {
+        if ('woocommerce' === $domain && 'Hi %s,' === $text && null !== self::$new_account_greet_name) {
+            // The template runs this string through printf() with the username as the arg;
+            // dropping the %s makes printf ignore it, and %→%% keeps a stray % in a name
+            // (rare) from being read as a format directive.
+            return 'Hi ' . str_replace('%', '%%', self::$new_account_greet_name) . ',';
+        }
+        return $translated;
     }
 
     public static function pos_guard_hcsa() {
@@ -666,25 +707,28 @@ final class Galado_Club_Bridge {
                 if (!function_exists('wc_create_new_customer')) {
                     return new WP_Error('no_woocommerce', 'WooCommerce not active', ['status' => 501]);
                 }
-                // Empty password → WooCommerce follows the store's registration setting (generates
-                // one or emails a set-password link) and sends the new-account email.
-                $user_id = wc_create_new_customer($email, '', '', []);
+                // Name is set AT creation (passed into wp_insert_user via the $args) so it's
+                // already on the user when WooCommerce fires the new-account email during
+                // wc_create_new_customer — otherwise that email (and its greeting) sees only
+                // the auto-generated username. Empty password → WooCommerce emails a
+                // set-password link per the store's registration setting.
+                $first = sanitize_text_field((string) $request->get_param('first_name'));
+                $last  = sanitize_text_field((string) $request->get_param('last_name'));
+                $phone = sanitize_text_field((string) $request->get_param('phone'));
+                $full  = trim("$first $last");
+                $create_args = [];
+                if ($first !== '') { $create_args['first_name'] = $first; }
+                if ($last !== '')  { $create_args['last_name']  = $last; }
+                if ($full !== '')  { $create_args['display_name'] = $full; $create_args['nickname'] = $full; }
+                $user_id = wc_create_new_customer($email, '', '', $create_args);
                 if (is_wp_error($user_id)) {
                     return new WP_Error('create_failed', $user_id->get_error_message(), ['status' => 409]);
                 }
                 update_user_meta($user_id, 'galado_club_origin', 'club');
-                // Optional profile details (used by POS walk-in signups).
-                $first = sanitize_text_field((string) $request->get_param('first_name'));
-                $last  = sanitize_text_field((string) $request->get_param('last_name'));
-                $phone = sanitize_text_field((string) $request->get_param('phone'));
-                if ($first || $last) {
-                    wp_update_user(['ID' => $user_id, 'first_name' => $first, 'last_name' => $last, 'display_name' => trim("$first $last")]);
-                    update_user_meta($user_id, 'billing_first_name', $first);
-                    update_user_meta($user_id, 'billing_last_name', $last);
-                }
-                if ($phone) {
-                    update_user_meta($user_id, 'billing_phone', $phone);
-                }
+                // Billing name/phone for the customer profile + future orders.
+                if ($first !== '') { update_user_meta($user_id, 'billing_first_name', $first); }
+                if ($last !== '')  { update_user_meta($user_id, 'billing_last_name', $last); }
+                if ($phone !== '') { update_user_meta($user_id, 'billing_phone', $phone); }
                 return ['ok' => true, 'status' => 'created', 'user_id' => (int) $user_id];
             },
         ]);
