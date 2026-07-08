@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.17.6
+ * Version: 0.17.7
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.17.6';
+    const VERSION  = '0.17.7';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -1116,7 +1116,7 @@ final class Galado_Club_Bridge {
         $res = wp_remote_post(GALADO_CLUB_URL . '/api/claim/request', [
             'timeout' => 8,
             'headers' => ['content-type' => 'application/json', 'x-club-bridge-secret' => GALADO_CLUB_BRIDGE_SECRET],
-            'body'    => wp_json_encode(['email' => $email, 'name' => mb_substr($name, 0, 60), 'clientIp' => $ip]),
+            'body'    => wp_json_encode(['email' => $email, 'name' => mb_substr($name, 0, 60), 'clientIp' => $ip, 'source' => 'popup']),
         ]);
         if (is_wp_error($res)) {
             return new WP_Error('unreachable', 'The Club is catching its breath. Please try again shortly.', ['status' => 503]);

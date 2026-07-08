@@ -1,5 +1,5 @@
 === GALADO Club Bridge ===
-Stable tag: 0.17.6
+Stable tag: 0.17.7
 Requires at least: 5.8
 Requires PHP: 7.4
 License: GPLv2 or later
