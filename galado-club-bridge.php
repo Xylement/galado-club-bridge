@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.17.0
+ * Version: 0.17.1
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.17.0';
+    const VERSION  = '0.17.1';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -1226,7 +1226,7 @@ if(st&&st.joined)return;
 if(st&&st.snooze&&Date.now()<st.snooze)return;
 var main=box.querySelector('.pj-main'),done=box.querySelector('.pj-done'),form=box.querySelector('.pj-f'),err=box.querySelector('.pj-err'),btn=form.querySelector('.pj-btn');
 function save(o){try{localStorage.setItem(KEY,JSON.stringify(o))}catch(e){}}
-function close(snoozeDays){box.classList.remove('on');if(snoozeDays)save({snooze:Date.now()+snoozeDays*864e5});document.removeEventListener('keydown',esc)}
+function close(snoozeDays){box.classList.remove('on');box.style.display='none';if(snoozeDays)save({snooze:Date.now()+snoozeDays*864e5});document.removeEventListener('keydown',esc)}
 function esc(e){if(e.key==='Escape')close(7)}
 box.addEventListener('click',function(e){if(e.target===box)close(7)});
 box.querySelector('.pj-x').addEventListener('click',function(){close(7)});
@@ -1245,7 +1245,7 @@ else{err.textContent=(r.body&&r.body.message)||'Something went sideways. Please 
 })
 .catch(function(){err.textContent='Could not reach us. Please try again.';err.style.display='block';btn.disabled=false;btn.textContent='I’M IN ✦'});
 });
-setTimeout(function(){box.classList.add('on')},7000);
+setTimeout(function(){box.classList.add('on');box.style.display='flex'},7000);
 })();
 </script>
 <?php
