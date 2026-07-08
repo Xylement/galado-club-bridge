@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.17.2
+ * Version: 0.17.3
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.17.2';
+    const VERSION  = '0.17.3';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -307,7 +307,7 @@ final class Galado_Club_Bridge {
             return;
         }
         ?>
-<script>var REST_URL=<?php echo wp_json_encode($rest); ?>;
+<script>var GLDPJ_REST=<?php echo wp_json_encode($rest); ?>;
 (function(){
 var KEY='gldpj_v1';
 function boxes(){return [].slice.call(document.querySelectorAll('#gldpj'))}
@@ -316,9 +316,11 @@ var st=null;try{st=JSON.parse(localStorage.getItem(KEY)||'null')}catch(e){}
 if(st&&st.joined)return;
 if(st&&st.snooze&&Date.now()<st.snooze)return;
 function save(o){try{localStorage.setItem(KEY,JSON.stringify(o))}catch(e){}}
-function closeAll(snoozeDays){boxes().forEach(function(b){b.classList.remove('on');b.style.display='none'});if(snoozeDays)save({snooze:Date.now()+snoozeDays*864e5})}
+function isOpen(){return boxes().some(function(b){return b.style.display==='flex'})}
+function closeAll(snoozeDays){if(!isOpen())return;boxes().forEach(function(b){b.classList.remove('on');b.style.display='none'});if(snoozeDays)save({snooze:Date.now()+snoozeDays*864e5})}
 document.addEventListener('keydown',function(e){if(e.key==='Escape')closeAll(7)});
 document.addEventListener('click',function(e){
+if(!isOpen())return;
 var t=e.target;
 if(t&&t.id==='gldpj'){closeAll(7);return}
 if(!t||!t.closest)return;
@@ -337,7 +339,7 @@ var name=(f.querySelector('input[name=name]').value||'').trim();
 var hp=(f.querySelector('input[name=website]').value||'');
 if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){err.textContent='Please enter a valid email.';err.style.display='block';return}
 err.style.display='none';btn.disabled=true;btn.textContent='Sending\u2026';
-fetch(REST_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,email:email,website:hp})})
+fetch(GLDPJ_REST,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,email:email,website:hp})})
 .then(function(r){return r.json().then(function(b){return{ok:r.ok,body:b}})})
 .then(function(r){
 if(r.ok){card.querySelector('.pj-mail').textContent=email;card.querySelector('.pj-main').style.display='none';card.querySelector('.pj-done').style.display='block';save({joined:true})}
