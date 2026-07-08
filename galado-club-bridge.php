@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.17.3
+ * Version: 0.17.4
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.17.3';
+    const VERSION  = '0.17.4';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -311,22 +311,27 @@ final class Galado_Club_Bridge {
 (function(){
 var KEY='gldpj_v1';
 function boxes(){return [].slice.call(document.querySelectorAll('#gldpj'))}
+function chips(){return [].slice.call(document.querySelectorAll('#gldpj-min'))}
 if(!boxes().length)return;
 var st=null;try{st=JSON.parse(localStorage.getItem(KEY)||'null')}catch(e){}
 if(st&&st.joined)return;
-if(st&&st.snooze&&Date.now()<st.snooze)return;
 function save(o){try{localStorage.setItem(KEY,JSON.stringify(o))}catch(e){}}
 function isOpen(){return boxes().some(function(b){return b.style.display==='flex'})}
-function closeAll(snoozeDays){if(!isOpen())return;boxes().forEach(function(b){b.classList.remove('on');b.style.display='none'});if(snoozeDays)save({snooze:Date.now()+snoozeDays*864e5})}
+function showChip(){chips().forEach(function(c){c.style.display='flex'})}
+function hideChip(){chips().forEach(function(c){c.style.display='none'})}
+function openAll(){boxes().forEach(function(b){b.classList.add('on');b.style.display='flex'});hideChip()}
+function closeAll(snoozeDays){if(!isOpen())return;boxes().forEach(function(b){b.classList.remove('on');b.style.display='none'});showChip();if(snoozeDays)save({snooze:Date.now()+snoozeDays*864e5})}
+function joined(){boxes().forEach(function(b){b.classList.remove('on')});hideChip();save({joined:true})}
 document.addEventListener('keydown',function(e){if(e.key==='Escape')closeAll(7)});
 document.addEventListener('click',function(e){
-if(!isOpen())return;
 var t=e.target;
+if(t&&t.closest&&t.closest('#gldpj-min')){openAll();return}
+if(!isOpen())return;
 if(t&&t.id==='gldpj'){closeAll(7);return}
 if(!t||!t.closest)return;
 if(t.closest('#gldpj .pj-x')){closeAll(7);return}
 if(t.closest('#gldpj .pj-no')){closeAll(14);return}
-if(t.closest('#gldpj .pj-ok')){closeAll(0);save({joined:true});return}
+if(t.closest('#gldpj .pj-ok')){boxes().forEach(function(b){b.style.display='none'});joined();return}
 },true);
 document.addEventListener('submit',function(e){
 var f=e.target;
@@ -342,12 +347,13 @@ err.style.display='none';btn.disabled=true;btn.textContent='Sending\u2026';
 fetch(GLDPJ_REST,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,email:email,website:hp})})
 .then(function(r){return r.json().then(function(b){return{ok:r.ok,body:b}})})
 .then(function(r){
-if(r.ok){card.querySelector('.pj-mail').textContent=email;card.querySelector('.pj-main').style.display='none';card.querySelector('.pj-done').style.display='block';save({joined:true})}
+if(r.ok){card.querySelector('.pj-mail').textContent=email;card.querySelector('.pj-main').style.display='none';card.querySelector('.pj-done').style.display='block';joined();boxes().forEach(function(b){b.style.display='flex'})}
 else{err.textContent=(r.body&&r.body.message)||'Something went sideways. Please try again.';err.style.display='block';btn.disabled=false;btn.textContent='I\u2019M IN \u2726'}
 })
 .catch(function(){err.textContent='Could not reach us. Please try again.';err.style.display='block';btn.disabled=false;btn.textContent='I\u2019M IN \u2726'});
 },true);
-setTimeout(function(){boxes().forEach(function(b){b.classList.add('on');b.style.display='flex'})},7000);
+if(st&&st.snooze&&Date.now()<st.snooze){showChip()}
+else{setTimeout(function(){openAll()},7000)}
 })();</script>
 <?php
     }
@@ -1218,7 +1224,12 @@ setTimeout(function(){boxes().forEach(function(b){b.classList.add('on');b.style.
 #gldpj .pj-done .pj-em{font-size:40px;line-height:1;}
 #gldpj .pj-done h3{margin:10px 0 6px;font-family:'Archivo','Arial Black',Arial,sans-serif;font-weight:900;font-size:22px;color:#111;}
 #gldpj .pj-done p{margin:0 0 6px;font-size:14px;color:#4A4A4A;line-height:1.6;}
+#gldpj-min{position:fixed;left:18px;bottom:18px;z-index:999998;width:52px;height:52px;border-radius:50%;background:#fff;border:2px solid #111111;box-shadow:0 6px 18px rgba(17,17,17,.22);cursor:pointer;padding:0;align-items:center;justify-content:center;transition:transform .15s;}
+#gldpj-min:hover{transform:scale(1.08);}
+#gldpj-min img{width:30px;height:auto;display:block;margin:0 auto;}
 @media (max-width:640px){
+#gldpj-min{left:12px;bottom:12px;width:48px;height:48px;}
+
 #gldpj .pj-card{grid-template-columns:1fr;max-width:420px;}
 #gldpj .pj-vis{min-height:130px;}
 #gldpj .pj-vis .pj-b1{left:calc(50% - 120px);height:120px;}
@@ -1258,6 +1269,9 @@ setTimeout(function(){boxes().forEach(function(b){b.classList.add('on');b.style.
 </div>
 </div>
 </div>
+<button id="gldpj-min" type="button" aria-label="Join the GALADO Club" title="GALADO Club" style="display:none;">
+<img src="https://club.galado.com.my/coin.png" alt="" loading="lazy"/>
+</button>
 <script>
 (function(){
 var KEY='gldpj_v1',box=document.getElementById('gldpj');
