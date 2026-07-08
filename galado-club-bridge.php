@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.17.5
+ * Version: 0.17.6
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.17.5';
+    const VERSION  = '0.17.6';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -1142,26 +1142,38 @@ final class Galado_Club_Bridge {
         ?>
 <div id="gldpj" role="dialog" aria-modal="true" aria-labelledby="gldpj-title" style="display:none;">
 <style>
-#gldpj{position:fixed;inset:0;z-index:999999;align-items:center;justify-content:center;padding:18px;background:rgba(17,17,17,.45);}
+#gldpj{position:fixed;inset:0;z-index:999999;align-items:center;justify-content:center;padding:18px;background:rgba(17,17,17,.45);overflow:auto;}
 #gldpj.on{display:flex;}
-#gldpj .pj-card{position:relative;width:100%;max-width:700px;background:#fff;border-radius:20px;overflow:hidden;display:grid;grid-template-columns:280px 1fr;box-shadow:0 24px 70px rgba(17,17,17,.28);font-family:'Inter',-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;}
-#gldpj .pj-vis{position:relative;background:#FFF4EC;background-image:radial-gradient(#E4002B26 3px,transparent 3px),radial-gradient(#FFC93C4D 2.5px,transparent 2.5px);background-size:34px 34px,26px 26px;background-position:0 0,13px 17px;min-height:340px;}
-#gldpj .pj-vis img{position:absolute;bottom:0;width:auto;}
-#gldpj .pj-vis .pj-b1{left:8px;height:240px;}
-#gldpj .pj-vis .pj-b2{right:6px;height:205px;}
-#gldpj .pj-form{padding:30px 28px 24px;}
-#gldpj .pj-eyebrow{font-family:'Archivo','Arial Black',Arial,sans-serif;font-weight:700;font-size:11px;letter-spacing:2px;color:#E4002B;text-transform:uppercase;}
-#gldpj h2{margin:8px 0 10px;font-family:'Archivo','Arial Black',Arial,sans-serif;font-weight:900;font-size:28px;line-height:1.08;letter-spacing:-.5px;color:#111111;text-transform:uppercase;}
-#gldpj .pj-sub{margin:0 0 18px;font-size:14px;line-height:1.6;color:#4A4A4A;}
-#gldpj input[type=text],#gldpj input[type=email]{display:block;width:100%;box-sizing:border-box;border:0;border-bottom:2px solid #D9D9D9;padding:10px 2px;margin:0 0 14px;font-size:15px;color:#111;background:transparent;outline:none;border-radius:0;}
+#gldpj .pj-card{position:relative;width:100%;max-width:440px;margin:auto;background:#fff;border-radius:20px;overflow:hidden;box-shadow:0 24px 70px rgba(17,17,17,.28);font-family:'Inter',-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;}
+#gldpj .pj-vis{position:relative;min-height:196px;background:#FFF4EC;background-image:radial-gradient(rgba(228,0,43,.15) 3px,transparent 3px),radial-gradient(rgba(255,201,60,.32) 2.5px,transparent 2.5px);background-size:34px 34px,26px 26px;background-position:0 0,13px 17px;}
+#gldpj .pj-vis .b{position:absolute;bottom:0;width:auto;}
+#gldpj .pj-vis .pj-coin{width:26px;top:15px;left:44%;opacity:.9;}
+#gldpj .pj-form{padding:24px 26px 22px;}
+#gldpj .pj-eyebrow{text-align:center;font-family:'Archivo','Arial Black',Arial,sans-serif;font-weight:700;font-size:11px;letter-spacing:2px;color:#E4002B;text-transform:uppercase;}
+#gldpj h2{margin:8px 0 16px;text-align:center;font-family:'Archivo','Arial Black',Arial,sans-serif;font-weight:900;font-size:26px;line-height:1.06;letter-spacing:-.5px;color:#111111;text-transform:uppercase;}
+#gldpj .pj-perks{list-style:none;margin:0 0 16px;padding:0;display:grid;gap:10px;}
+#gldpj .pj-perks li{display:flex;align-items:center;gap:10px;font-size:13.5px;line-height:1.35;color:#111111;font-weight:500;}
+#gldpj .pj-pk{width:26px;height:26px;flex:none;border-radius:8px;display:flex;align-items:center;justify-content:center;background:#FFF0F2;color:#E4002B;}
+#gldpj .pj-pk svg{width:15px;height:15px;}
+#gldpj .pj-pk img{width:17px;height:17px;}
+#gldpj .pj-ladder{margin:0 0 18px;padding:14px 14px 12px;background:#FAF8F6;border:1px solid #E6E4E1;border-radius:14px;}
+#gldpj .pj-ladder-h{font-size:10px;letter-spacing:1.6px;text-transform:uppercase;color:#8C8C8C;font-weight:800;margin:0 0 10px;text-align:center;}
+#gldpj .pj-steps{display:flex;align-items:flex-start;}
+#gldpj .pj-step{flex:1;text-align:center;position:relative;}
+#gldpj .pj-step .pj-dot{display:block;width:10px;height:10px;border-radius:50%;margin:0 auto 7px;position:relative;z-index:2;}
+#gldpj .pj-step .pj-nm{font-size:10.5px;font-weight:800;color:#111111;letter-spacing:.2px;}
+#gldpj .pj-step .pj-off{font-size:14px;font-weight:900;color:#111111;margin-top:2px;font-family:'Archivo','Arial Black',Arial,sans-serif;}
+#gldpj .pj-step .pj-off.red{color:#E4002B;}
+#gldpj .pj-step:not(:last-child):after{content:"";position:absolute;top:4px;left:55%;width:90%;height:2px;background:#E2DFDA;z-index:1;}
+#gldpj input[type=text],#gldpj input[type=email]{display:block;width:100%;box-sizing:border-box;border:0;border-bottom:2px solid #D9D9D9;padding:10px 2px;margin:0 0 12px;font-size:15px;color:#111;background:transparent;outline:none;border-radius:0;}
 #gldpj input:focus{border-bottom-color:#111111;}
 #gldpj .pj-hp{position:absolute;left:-9999px;opacity:0;height:0;width:0;}
 #gldpj .pj-btn{display:block;width:100%;border:0;cursor:pointer;background:#E4002B;color:#fff;font-family:'Archivo','Arial Black',Arial,sans-serif;font-weight:800;font-size:16px;letter-spacing:1px;padding:15px 20px;border-radius:999px;margin-top:6px;}
 #gldpj .pj-btn:disabled{opacity:.6;cursor:default;}
 #gldpj .pj-note{margin:12px 0 0;font-size:12px;color:#8C8C8C;text-align:center;}
-#gldpj .pj-no{display:block;margin:14px auto 0;background:none;border:0;cursor:pointer;font-size:12px;letter-spacing:1px;color:#8C8C8C;text-transform:uppercase;font-weight:600;}
-#gldpj .pj-x{position:absolute;top:12px;right:14px;background:none;border:0;cursor:pointer;font-size:22px;line-height:1;color:#8C8C8C;padding:6px;}
-#gldpj .pj-err{display:none;margin:10px 0 0;font-size:13px;color:#E4002B;font-weight:600;}
+#gldpj .pj-no{display:block;margin:12px auto 0;background:none;border:0;cursor:pointer;font-size:12px;letter-spacing:1px;color:#8C8C8C;text-transform:uppercase;font-weight:600;}
+#gldpj .pj-x{position:absolute;top:12px;right:14px;background:none;border:0;cursor:pointer;font-size:22px;line-height:1;color:#8C8C8C;padding:6px;z-index:9;}
+#gldpj .pj-err{display:none;margin:10px 0 0;font-size:13px;color:#E4002B;font-weight:600;text-align:center;}
 #gldpj .pj-done{display:none;text-align:center;padding:12px 6px;}
 #gldpj .pj-done .pj-em{font-size:40px;line-height:1;}
 #gldpj .pj-done h3{margin:10px 0 6px;font-family:'Archivo','Arial Black',Arial,sans-serif;font-weight:900;font-size:22px;color:#111;}
@@ -1171,25 +1183,41 @@ final class Galado_Club_Bridge {
 #gldpj-min img{width:30px;height:auto;display:block;margin:0 auto;}
 @media (max-width:640px){
 #gldpj-min{left:12px;bottom:12px;width:48px;height:48px;}
-#gldpj .pj-card{grid-template-columns:1fr;max-width:420px;}
-#gldpj .pj-vis{min-height:130px;}
-#gldpj .pj-vis .pj-b1{left:calc(50% - 120px);height:120px;}
-#gldpj .pj-vis .pj-b2{right:calc(50% - 118px);height:104px;}
+#gldpj .pj-vis{min-height:172px;}
+#gldpj .pj-vis .b{height:88%;}
 #gldpj h2{font-size:24px;}
 #gldpj .pj-form{padding:22px 20px 18px;}
 }
 </style>
 <div class="pj-card">
+<button type="button" class="pj-x" aria-label="Close">&times;</button>
 <div class="pj-vis" aria-hidden="true">
-<img class="pj-b1" src="https://club.galado.com.my/avatar-girl-cut.png" alt="" loading="lazy"/>
-<img class="pj-b2" src="https://club.galado.com.my/avatar-boy-cut.png" alt="" loading="lazy"/>
+<img class="b" style="left:-2%;height:150px;z-index:1" src="https://club.galado.com.my/avatar-boy-outfit-the-locals-cut.png" alt="" loading="lazy"/>
+<img class="b" style="left:14%;height:170px;z-index:2" src="https://club.galado.com.my/avatar-girl-outfit-deepavali-cut.png" alt="" loading="lazy"/>
+<img class="b" style="left:30%;height:186px;z-index:3" src="https://club.galado.com.my/avatar-boy-outfit-baju-raya-cut.png" alt="" loading="lazy"/>
+<img class="b" style="left:47%;height:190px;z-index:4" src="https://club.galado.com.my/avatar-girl-outfit-cny-cut.png" alt="" loading="lazy"/>
+<img class="b" style="left:64%;height:172px;z-index:3" src="https://club.galado.com.my/avatar-boy-outfit-futuristic-cut.png" alt="" loading="lazy"/>
+<img class="b" style="left:80%;height:156px;z-index:2" src="https://club.galado.com.my/avatar-girl-outfit-royals-cut.png" alt="" loading="lazy"/>
+<img class="b pj-coin" src="https://club.galado.com.my/coin.png" alt="" loading="lazy"/>
 </div>
 <div class="pj-form">
-<button type="button" class="pj-x" aria-label="Close">&times;</button>
 <div class="pj-main">
 <div class="pj-eyebrow">GALADO Club &middot; Free to join</div>
-<h2 id="gldpj-title">Meet your Buddy</h2>
-<p class="pj-sub">Adopt a Buddy to dress up, play daily mini games, earn G-Coins with every order, and unlock member-only drops.</p>
+<h2 id="gldpj-title">Meet the Club</h2>
+<ul class="pj-perks">
+<li><span class="pj-pk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 21s-7-4.5-7-10a4 4 0 0 1 7-2.5A4 4 0 0 1 19 11c0 5.5-7 10-7 10z"/></svg></span>Adopt &amp; dress up your own Buddy</li>
+<li><span class="pj-pk"><img src="https://club.galado.com.my/coin.png" alt=""/></span>Earn G-Coins on every order</li>
+<li><span class="pj-pk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 12h4M9 10v4M16 11h.01M18 13h.01"/></svg></span>Daily games, Spin &amp; member-only drops</li>
+</ul>
+<div class="pj-ladder">
+<div class="pj-ladder-h">Level up as you shop</div>
+<div class="pj-steps">
+<div class="pj-step"><span class="pj-dot" style="background:#9AA7B5"></span><div class="pj-nm">Silver</div><div class="pj-off">Join</div></div>
+<div class="pj-step"><span class="pj-dot" style="background:#E9A93D"></span><div class="pj-nm">Gold</div><div class="pj-off red">5% off</div></div>
+<div class="pj-step"><span class="pj-dot" style="background:#6FC7E8"></span><div class="pj-nm">Diamond</div><div class="pj-off red">10% off</div></div>
+<div class="pj-step"><span class="pj-dot" style="background:#2E2630"></span><div class="pj-nm">Black</div><div class="pj-off red">15% off</div></div>
+</div>
+</div>
 <form class="pj-f" novalidate onsubmit="return false">
 <input type="text" name="name" placeholder="Your name" maxlength="60" autocomplete="given-name"/>
 <input type="email" name="email" placeholder="Email" maxlength="254" required autocomplete="email"/>

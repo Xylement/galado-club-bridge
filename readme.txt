@@ -1,14 +1,28 @@
 === GALADO Club Bridge ===
-Stable tag: 0.4.0
+Stable tag: 0.17.6
 Requires at least: 5.8
 Requires PHP: 7.4
 License: GPLv2 or later
 
 Connects galado.com.my (WooCommerce) to GALADO Club (club.galado.com.my): My Account
-"GALADO Club" tab, SSO sign-in, tier + Shopping-Credits mirroring, and
-order/warranty/review webhooks for G-Coin crediting.
+"GALADO Club" tab, SSO sign-in, tier + Shopping-Credits mirroring, customer
+provisioning, Points read/add/deduct/lifetime, POS customer search + receipts,
+the HCSA order-fatal guard, and store-signup/review webhooks. NOTE: the Woo
+ORDER webhook is a native WooCommerce webhook created by hand in wp-admin, not
+registered by this plugin.
+
+The authoritative version is `const VERSION` in galado-club-bridge.php; verify
+the LIVE build with the public GET /wp-json/galado-club/v1/ping. Deploy is
+push-to-Xylement/galado-club-bridge (WP Git Sync), NOT the zips in this folder
+(the v0.2.x zips are obsolete manual-upload relics — do not deploy them).
 
 == Changelog ==
+= 0.5.0–0.15.2 =
+* POS support (customer search, receipts, email/Klaviyo suppression), HCSA
+  order-fatal guard, single/bulk customer provisioning, Points add/deduct/
+  lifetime endpoints, welcome first-order discount, WCPA product-form dump,
+  named new-account greeting. See the nested repo commit log for per-version
+  detail (github.com/Xylement/galado-club-bridge).
 = 0.4.0 =
 * Referral RM10 welcome: -RM10 at checkout for a referred new customer (galado_ref cookie + no prior paid orders, min RM30 subtotal).
 = 0.3.0 =
