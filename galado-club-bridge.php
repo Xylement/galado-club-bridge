@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.16.0
+ * Version: 0.17.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.16.0';
+    const VERSION  = '0.17.0';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -53,6 +53,9 @@ final class Galado_Club_Bridge {
         add_action('comment_post', [__CLASS__, 'on_comment_post'], 10, 2);
         // Referral: capture ?ref= into a 30-day cookie, then stamp it onto the order at checkout.
         add_action('wp_footer', [__CLASS__, 'ref_cookie_script']);
+        // Club join popup (replaces the retired Klaviyo subscription popup): guests only,
+        // never on cart/checkout/account. Name + email → Club emails a one-tap sign-in link.
+        add_action('wp_footer', [__CLASS__, 'join_popup'], 40);
         add_action('woocommerce_checkout_create_order', [__CLASS__, 'capture_referral'], 10, 1);
         add_action('woocommerce_store_api_checkout_update_order_from_request', [__CLASS__, 'capture_referral'], 10, 1);
         // Club welcome offer: capture ?welcome=<signed token> into a 30-day cookie.
@@ -679,6 +682,15 @@ final class Galado_Club_Bridge {
                 return ['ok' => true, 'version' => self::VERSION, 'hooks' => ['transition_comment_status', 'comment_post', 'woocommerce_checkout_create_order', 'woocommerce_cart_calculate_fees', 'user_register']];
             },
         ]);
+        // Storefront join popup → Club magic link. Public (guests submit it), defended in
+        // layers: honeypot field, per-IP transient throttle here, then the Club's own
+        // per-email + per-IP + daily caps (called with the bridge secret so the real
+        // visitor IP is what gets rate-limited, not this server's).
+        register_rest_route('galado-club/v1', '/popup-join', [
+            'methods'             => 'POST',
+            'permission_callback' => '__return_true',
+            'callback'            => [__CLASS__, 'popup_join'],
+        ]);
         register_rest_route('galado-club/v1', '/tier', [
             'methods'             => 'POST',
             'permission_callback' => [__CLASS__, 'bridge_auth'],
@@ -1081,6 +1093,162 @@ final class Galado_Club_Bridge {
             . '<a href="https://club.galado.com.my/?src=midyear-store" style="display:inline-block;background:#E4002B;color:#fff;font-weight:800;border-radius:999px;padding:10px 18px;text-decoration:none;">Join the Club free</a>'
             . '<a href="' . esc_url(wc_get_page_permalink('myaccount')) . '" style="display:inline-block;margin-left:12px;font-weight:700;color:#111111;">Already a member? Log in</a>'
             . '</div>';
+    }
+
+    /* ── Club join popup (2026-07-08, replaces the retired Klaviyo popup) ─────────────
+     * Guests only. Name + email → REST /popup-join → Club /api/claim/request → the Club
+     * emails a one-tap magic sign-in link (20 min TTL); claiming it creates the member,
+     * fires the welcome email, provisions the store account and starts onboarding.
+     * No voucher — the pitch is the Club itself (Buddy, games, G-Coins, member drops). */
+
+    /** REST: forward the popup submit to the Club with layered abuse guards. */
+    public static function popup_join(WP_REST_Request $request) {
+        // Honeypot: bots fill "website"; humans never see it. Pretend success.
+        if ('' !== trim((string) $request->get_param('website'))) {
+            return ['ok' => true];
+        }
+        $email = sanitize_email((string) $request->get_param('email'));
+        $name  = sanitize_text_field((string) $request->get_param('name'));
+        if (!$email || !is_email($email)) {
+            return new WP_Error('bad_request', 'Please enter a valid email.', ['status' => 400]);
+        }
+        $ip  = isset($_SERVER['REMOTE_ADDR']) ? (string) $_SERVER['REMOTE_ADDR'] : 'unknown';
+        $key = 'gld_pj_' . md5($ip);
+        $n   = (int) get_transient($key);
+        if ($n >= 6) { // 6 submits/hour/IP at the WP layer; the Club enforces its own caps too
+            return new WP_Error('slow_down', 'Too many tries from this connection. Please wait a while.', ['status' => 429]);
+        }
+        set_transient($key, $n + 1, HOUR_IN_SECONDS);
+
+        $res = wp_remote_post(GALADO_CLUB_URL . '/api/claim/request', [
+            'timeout' => 8,
+            'headers' => [
+                'content-type'         => 'application/json',
+                'x-club-bridge-secret' => GALADO_CLUB_BRIDGE_SECRET,
+            ],
+            'body'    => wp_json_encode(['email' => $email, 'name' => mb_substr($name, 0, 60), 'clientIp' => $ip]),
+        ]);
+        if (is_wp_error($res)) {
+            return new WP_Error('unreachable', 'The Club is catching its breath. Please try again shortly.', ['status' => 503]);
+        }
+        $code = (int) wp_remote_retrieve_response_code($res);
+        if (429 === $code) {
+            return new WP_Error('slow_down', 'Too many sign-in requests. Please wait a few minutes.', ['status' => 429]);
+        }
+        if ($code >= 400) {
+            return new WP_Error('failed', 'Something went sideways. Please try again.', ['status' => 502]);
+        }
+        return ['ok' => true];
+    }
+
+    /** The popup itself — markup, styles and behaviour, fully self-contained. */
+    public static function join_popup() {
+        if (is_admin() || is_user_logged_in()) {
+            return;
+        }
+        if (function_exists('is_cart') && (is_cart() || is_checkout() || is_account_page())) {
+            return; // never interrupt buying or signing in
+        }
+        $rest = esc_url_raw(rest_url('galado-club/v1/popup-join'));
+        ?>
+<div id="gldpj" role="dialog" aria-modal="true" aria-labelledby="gldpj-title" style="display:none;">
+<style>
+#gldpj{position:fixed;inset:0;z-index:999999;align-items:center;justify-content:center;padding:18px;background:rgba(17,17,17,.45);}
+#gldpj.on{display:flex;}
+#gldpj .pj-card{position:relative;width:100%;max-width:700px;background:#fff;border-radius:20px;overflow:hidden;display:grid;grid-template-columns:280px 1fr;box-shadow:0 24px 70px rgba(17,17,17,.28);font-family:'Inter',-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;}
+#gldpj .pj-vis{position:relative;background:#FFF4EC;background-image:radial-gradient(#E4002B26 3px,transparent 3px),radial-gradient(#FFC93C4D 2.5px,transparent 2.5px);background-size:34px 34px,26px 26px;background-position:0 0,13px 17px;min-height:340px;}
+#gldpj .pj-vis img{position:absolute;bottom:0;width:auto;}
+#gldpj .pj-vis .pj-b1{left:8px;height:240px;}
+#gldpj .pj-vis .pj-b2{right:6px;height:205px;}
+#gldpj .pj-form{padding:30px 28px 24px;}
+#gldpj .pj-eyebrow{font-family:'Archivo','Arial Black',Arial,sans-serif;font-weight:700;font-size:11px;letter-spacing:2px;color:#E4002B;text-transform:uppercase;}
+#gldpj h2{margin:8px 0 10px;font-family:'Archivo','Arial Black',Arial,sans-serif;font-weight:900;font-size:28px;line-height:1.08;letter-spacing:-.5px;color:#111111;text-transform:uppercase;}
+#gldpj .pj-sub{margin:0 0 18px;font-size:14px;line-height:1.6;color:#4A4A4A;}
+#gldpj input[type=text],#gldpj input[type=email]{display:block;width:100%;box-sizing:border-box;border:0;border-bottom:2px solid #D9D9D9;padding:10px 2px;margin:0 0 14px;font-size:15px;color:#111;background:transparent;outline:none;border-radius:0;}
+#gldpj input:focus{border-bottom-color:#111111;}
+#gldpj .pj-hp{position:absolute;left:-9999px;opacity:0;height:0;width:0;}
+#gldpj .pj-btn{display:block;width:100%;border:0;cursor:pointer;background:#E4002B;color:#fff;font-family:'Archivo','Arial Black',Arial,sans-serif;font-weight:800;font-size:16px;letter-spacing:1px;padding:15px 20px;border-radius:999px;margin-top:6px;}
+#gldpj .pj-btn:disabled{opacity:.6;cursor:default;}
+#gldpj .pj-note{margin:12px 0 0;font-size:12px;color:#8C8C8C;text-align:center;}
+#gldpj .pj-no{display:block;margin:14px auto 0;background:none;border:0;cursor:pointer;font-size:12px;letter-spacing:1px;color:#8C8C8C;text-transform:uppercase;font-weight:600;}
+#gldpj .pj-x{position:absolute;top:12px;right:14px;background:none;border:0;cursor:pointer;font-size:22px;line-height:1;color:#8C8C8C;padding:6px;}
+#gldpj .pj-err{display:none;margin:10px 0 0;font-size:13px;color:#E4002B;font-weight:600;}
+#gldpj .pj-done{display:none;text-align:center;padding:12px 6px;}
+#gldpj .pj-done .pj-em{font-size:40px;line-height:1;}
+#gldpj .pj-done h3{margin:10px 0 6px;font-family:'Archivo','Arial Black',Arial,sans-serif;font-weight:900;font-size:22px;color:#111;}
+#gldpj .pj-done p{margin:0 0 6px;font-size:14px;color:#4A4A4A;line-height:1.6;}
+@media (max-width:640px){
+#gldpj .pj-card{grid-template-columns:1fr;max-width:420px;}
+#gldpj .pj-vis{min-height:130px;}
+#gldpj .pj-vis .pj-b1{left:calc(50% - 120px);height:120px;}
+#gldpj .pj-vis .pj-b2{right:calc(50% - 118px);height:104px;}
+#gldpj h2{font-size:24px;}
+#gldpj .pj-form{padding:22px 20px 18px;}
+}
+</style>
+<div class="pj-card">
+<div class="pj-vis" aria-hidden="true">
+<img class="pj-b1" src="https://club.galado.com.my/avatar-girl-cut.png" alt="" loading="lazy"/>
+<img class="pj-b2" src="https://club.galado.com.my/avatar-boy-cut.png" alt="" loading="lazy"/>
+</div>
+<div class="pj-form">
+<button type="button" class="pj-x" aria-label="Close">&times;</button>
+<div class="pj-main">
+<div class="pj-eyebrow">GALADO Club &middot; Free to join</div>
+<h2 id="gldpj-title">Meet your Buddy</h2>
+<p class="pj-sub">Adopt a Buddy to dress up, play daily mini games, earn G-Coins with every order, and unlock member-only drops.</p>
+<form class="pj-f" novalidate>
+<input type="text" name="name" placeholder="Your name" maxlength="60" autocomplete="given-name"/>
+<input type="email" name="email" placeholder="Email" maxlength="254" required autocomplete="email"/>
+<input type="text" name="website" class="pj-hp" tabindex="-1" autocomplete="off" aria-hidden="true"/>
+<button type="submit" class="pj-btn">I&#8217;M IN &#10022;</button>
+<p class="pj-err"></p>
+</form>
+<p class="pj-note">One tap, no password. We&#8217;ll email you a sign-in link.</p>
+<button type="button" class="pj-no">No thanks</button>
+</div>
+<div class="pj-done">
+<div class="pj-em" aria-hidden="true">&#9993;&#65039;</div>
+<h3>Check your inbox &#10022;</h3>
+<p>We sent a one-tap sign-in link to <strong class="pj-mail"></strong>.</p>
+<p style="font-size:12.5px;color:#8C8C8C;">It works for 20 minutes. If it plays hide and seek, peek in spam.</p>
+<button type="button" class="pj-btn pj-ok" style="max-width:220px;margin:14px auto 0;">Done</button>
+</div>
+</div>
+</div>
+</div>
+<script>
+(function(){
+var KEY='gldpj_v1',box=document.getElementById('gldpj');
+if(!box)return;
+var st=null;try{st=JSON.parse(localStorage.getItem(KEY)||'null')}catch(e){}
+if(st&&st.joined)return;
+if(st&&st.snooze&&Date.now()<st.snooze)return;
+var main=box.querySelector('.pj-main'),done=box.querySelector('.pj-done'),form=box.querySelector('.pj-f'),err=box.querySelector('.pj-err'),btn=form.querySelector('.pj-btn');
+function save(o){try{localStorage.setItem(KEY,JSON.stringify(o))}catch(e){}}
+function close(snoozeDays){box.classList.remove('on');if(snoozeDays)save({snooze:Date.now()+snoozeDays*864e5});document.removeEventListener('keydown',esc)}
+function esc(e){if(e.key==='Escape')close(7)}
+box.addEventListener('click',function(e){if(e.target===box)close(7)});
+box.querySelector('.pj-x').addEventListener('click',function(){close(7)});
+box.querySelector('.pj-no').addEventListener('click',function(){close(14)});
+box.querySelector('.pj-ok').addEventListener('click',function(){close(0)});
+form.addEventListener('submit',function(e){
+e.preventDefault();
+var email=(form.email.value||'').trim();
+if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){err.textContent='Please enter a valid email.';err.style.display='block';return}
+err.style.display='none';btn.disabled=true;btn.textContent='Sending…';
+fetch(<?php echo wp_json_encode($rest); ?>,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:(form.name.value||'').trim(),email:email,website:form.website.value||''})})
+.then(function(r){return r.json().then(function(b){return{ok:r.ok,body:b}})})
+.then(function(r){
+if(r.ok){box.querySelector('.pj-mail').textContent=email;main.style.display='none';done.style.display='block';save({joined:true})}
+else{err.textContent=(r.body&&r.body.message)||'Something went sideways. Please try again.';err.style.display='block';btn.disabled=false;btn.textContent='I’M IN ✦'}
+})
+.catch(function(){err.textContent='Could not reach us. Please try again.';err.style.display='block';btn.disabled=false;btn.textContent='I’M IN ✦'});
+});
+setTimeout(function(){box.classList.add('on')},7000);
+})();
+</script>
+<?php
     }
 }
 
