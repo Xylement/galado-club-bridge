@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.15.2
+ * Version: 0.16.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,11 +21,23 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.15.2';
+    const VERSION  = '0.16.0';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
     const WELCOME30_MIN    = 120;// min cart subtotal (RM) for the Club welcome offer
+
+    // ── Mid-Year Member Sale (Thu 16 – Sun 19 Jul 2026, MYT) — SPEC-MIDYEAR-SALE-STORE.md ──
+    // Members (= any logged-in customer; every store account is Club-provisioned since the
+    // v0.12 two-way bridge + full backfill) pay 20% off the CURRENT selling price of the two
+    // hero products, all variants. Runtime filters only — no product data is written, so the
+    // rollback is the window passing (or reverting this block). Self-arming/disarming.
+    const MYS_HEROES  = [389955, 389852];       // Stylink Metal Chain, Luna Guard (variable parents)
+    const MYS_FACTOR  = 0.80;                   // member pays 20% off the current selling price
+    const MYS_START   = '2026-07-16 00:00:00';  // MYT — hard on-by is 11:00 same day
+    const MYS_END     = '2026-07-20 00:00:00';  // MYT — off Mon 20 Jul 00:00
+    const MYS_PREVIEW = 'mys-0716';             // ?gldmys=mys-0716 = display preview for THIS request only
+    const MYS_BLOCKED_COUPONS = ['lvlup5', 'diam10d', 'gblk15']; // tier codes never stack on heroes (best single price)
 
     public static function init() {
         add_action('init', [__CLASS__, 'add_endpoint']);
@@ -77,6 +89,18 @@ final class Galado_Club_Bridge {
         // which calls WC()->session->get() — null outside a real browser checkout). Detach
         // it just-in-time when there is no session; real checkouts are unaffected.
         add_action('woocommerce_new_order', [__CLASS__, 'pos_guard_hcsa'], 1);
+        // Mid-Year Member Sale (16–19 Jul 2026): member price on the two heroes, the
+        // join-to-unlock prompt for guests, and the tier-coupon stacking block. All
+        // window-gated (see MYS_* constants) — dormant outside the window.
+        add_filter('woocommerce_product_get_price', [__CLASS__, 'mys_member_price'], 20, 2);
+        add_filter('woocommerce_product_get_sale_price', [__CLASS__, 'mys_member_sale_price'], 20, 2);
+        add_filter('woocommerce_product_variation_get_price', [__CLASS__, 'mys_member_price'], 20, 2);
+        add_filter('woocommerce_product_variation_get_sale_price', [__CLASS__, 'mys_member_sale_price'], 20, 2);
+        add_filter('woocommerce_variation_prices_price', [__CLASS__, 'mys_member_price'], 20, 2);
+        add_filter('woocommerce_variation_prices_sale_price', [__CLASS__, 'mys_member_sale_price'], 20, 2);
+        add_filter('woocommerce_get_variation_prices_hash', [__CLASS__, 'mys_prices_hash'], 20, 1);
+        add_filter('woocommerce_coupon_is_valid_for_product', [__CLASS__, 'mys_block_tier_coupons'], 20, 3);
+        add_action('woocommerce_single_product_summary', [__CLASS__, 'mys_pdp_prompt'], 15);
         register_activation_hook(__FILE__, 'flush_rewrite_rules');
         register_deactivation_hook(__FILE__, 'flush_rewrite_rules');
     }
@@ -965,6 +989,98 @@ final class Galado_Club_Bridge {
                 return ['customers' => $out];
             },
         ]);
+    }
+
+    /* ── Mid-Year Member Sale helpers (see MYS_* constants for the what/why) ─────────
+     * Preview: append ?gldmys=mys-0716 to a hero product URL to see the in-window
+     * behaviour any day. Display-only for that request — cart/checkout requests
+     * without the param re-price normally, so nobody can BUY early via the preview. */
+
+    private static function mys_window_active() {
+        if (isset($_GET['gldmys']) && self::MYS_PREVIEW === (string) $_GET['gldmys']) {
+            return true;
+        }
+        try {
+            $tz  = new DateTimeZone('Asia/Kuala_Lumpur');
+            $now = new DateTime('now', $tz);
+            return $now >= new DateTime(self::MYS_START, $tz) && $now < new DateTime(self::MYS_END, $tz);
+        } catch (Exception $e) {
+            return false; // a TZ hiccup must never discount (or fatal) the storefront
+        }
+    }
+
+    /** Hero parent ID when $product is a hero or one of its variations, else 0. */
+    private static function mys_hero_parent($product) {
+        if (!($product instanceof WC_Product)) {
+            return 0;
+        }
+        $id = $product->get_parent_id() ?: $product->get_id();
+        return in_array((int) $id, self::MYS_HEROES, true) ? (int) $id : 0;
+    }
+
+    private static function mys_applies($product) {
+        return self::mys_window_active() && is_user_logged_in() && self::mys_hero_parent($product);
+    }
+
+    /** 20% off the current selling price for logged-in members, heroes only. */
+    public static function mys_member_price($price, $product) {
+        if ('' === $price || null === $price || !self::mys_applies($product)) {
+            return $price;
+        }
+        return (string) round(((float) $price) * self::MYS_FACTOR, 2);
+    }
+
+    /** Forces is_on_sale() for members so the strikethrough renders (Stylink shows
+     *  RM86 struck → RM68.80; Luna shows its RM109 regular struck → RM78.40). The
+     *  member price is 20% off the UNFILTERED current selling price ('edit'). */
+    public static function mys_member_sale_price($price, $product) {
+        if (!self::mys_applies($product)) {
+            return $price;
+        }
+        $base = $product->get_price('edit');
+        if ('' === $base || null === $base) {
+            return $price;
+        }
+        return (string) round(((float) $base) * self::MYS_FACTOR, 2);
+    }
+
+    /** Variation price ranges are transient-cached by hash — salt it with the
+     *  window + login state so member/guest never share a cached range. */
+    public static function mys_prices_hash($hash) {
+        $hash[] = 'mys:' . (self::mys_window_active() ? '1' : '0') . ':' . (is_user_logged_in() ? 'm' : 'g');
+        return $hash;
+    }
+
+    /** Best-single-price: the standing tier codes give nothing on the heroes while
+     *  the member price runs (coupon stays valid for other items in the cart). */
+    public static function mys_block_tier_coupons($valid, $product, $coupon) {
+        if (!$valid || !self::mys_window_active()) {
+            return $valid;
+        }
+        if (!($coupon instanceof WC_Coupon) || !in_array(strtolower($coupon->get_code()), self::MYS_BLOCKED_COUPONS, true)) {
+            return $valid;
+        }
+        return self::mys_hero_parent($product) ? false : $valid;
+    }
+
+    /** Under the PDP price: members get a quiet confirmation, guests get the
+     *  join-free prompt (the acquisition engine — visible, not buried). */
+    public static function mys_pdp_prompt() {
+        global $product;
+        if (!self::mys_window_active() || !($product instanceof WC_Product) || !self::mys_hero_parent($product)) {
+            return;
+        }
+        if (is_user_logged_in()) {
+            echo '<p style="margin:6px 0 14px;font-weight:700;color:#0E7A57;">&#10022; GALADO Club member price applied (20% off)</p>';
+            return;
+        }
+        $member_price = wc_price(round(((float) $product->get_price()) * self::MYS_FACTOR, 2));
+        echo '<div style="margin:6px 0 16px;padding:14px 16px;border:2px solid #111111;border-radius:14px;background:#FFF7F2;">'
+            . '<p style="margin:0 0 4px;font-weight:800;color:#111111;">GALADO Club members pay ' . wp_kses_post($member_price) . ' on this (20% off)</p>'
+            . '<p style="margin:0 0 10px;font-size:13px;color:#5f5f66;">Free to join, takes one tap. Free shipping stays, of course.</p>'
+            . '<a href="https://club.galado.com.my/?src=midyear-store" style="display:inline-block;background:#E4002B;color:#fff;font-weight:800;border-radius:999px;padding:10px 18px;text-decoration:none;">Join the Club free</a>'
+            . '<a href="' . esc_url(wc_get_page_permalink('myaccount')) . '" style="display:inline-block;margin-left:12px;font-weight:700;color:#111111;">Already a member? Log in</a>'
+            . '</div>';
     }
 }
 
