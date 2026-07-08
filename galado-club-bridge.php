@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.17.4
+ * Version: 0.17.5
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.17.4';
+    const VERSION  = '0.17.5';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -53,9 +53,6 @@ final class Galado_Club_Bridge {
         add_action('comment_post', [__CLASS__, 'on_comment_post'], 10, 2);
         // Referral: capture ?ref= into a 30-day cookie, then stamp it onto the order at checkout.
         add_action('wp_footer', [__CLASS__, 'ref_cookie_script']);
-        // Club join popup (replaces the retired Klaviyo subscription popup): guests only,
-        // never on cart/checkout/account. Name + email → Club emails a one-tap sign-in link.
-        add_action('wp_footer', [__CLASS__, 'join_popup'], 40);
         add_action('woocommerce_checkout_create_order', [__CLASS__, 'capture_referral'], 10, 1);
         add_action('woocommerce_store_api_checkout_update_order_from_request', [__CLASS__, 'capture_referral'], 10, 1);
         // Club welcome offer: capture ?welcome=<signed token> into a 30-day cookie.
@@ -92,6 +89,9 @@ final class Galado_Club_Bridge {
         // which calls WC()->session->get() — null outside a real browser checkout). Detach
         // it just-in-time when there is no session; real checkouts are unaffected.
         add_action('woocommerce_new_order', [__CLASS__, 'pos_guard_hcsa'], 1);
+        // Club join popup (replaces the retired Klaviyo subscription popup): guests only,
+        // never on cart/checkout/account. Name + email -> Club emails a one-tap sign-in link.
+        add_action('wp_footer', [__CLASS__, 'join_popup'], 40);
         // Mid-Year Member Sale (16–19 Jul 2026): member price on the two heroes, the
         // join-to-unlock prompt for guests, and the tier-coupon stacking block. All
         // window-gated (see MYS_* constants) — dormant outside the window.
@@ -307,54 +307,7 @@ final class Galado_Club_Bridge {
             return;
         }
         ?>
-<script>var GLDPJ_REST=<?php echo wp_json_encode($rest); ?>;
-(function(){
-var KEY='gldpj_v1';
-function boxes(){return [].slice.call(document.querySelectorAll('#gldpj'))}
-function chips(){return [].slice.call(document.querySelectorAll('#gldpj-min'))}
-if(!boxes().length)return;
-var st=null;try{st=JSON.parse(localStorage.getItem(KEY)||'null')}catch(e){}
-if(st&&st.joined)return;
-function save(o){try{localStorage.setItem(KEY,JSON.stringify(o))}catch(e){}}
-function isOpen(){return boxes().some(function(b){return b.style.display==='flex'})}
-function showChip(){chips().forEach(function(c){c.style.display='flex'})}
-function hideChip(){chips().forEach(function(c){c.style.display='none'})}
-function openAll(){boxes().forEach(function(b){b.classList.add('on');b.style.display='flex'});hideChip()}
-function closeAll(snoozeDays){if(!isOpen())return;boxes().forEach(function(b){b.classList.remove('on');b.style.display='none'});showChip();if(snoozeDays)save({snooze:Date.now()+snoozeDays*864e5})}
-function joined(){boxes().forEach(function(b){b.classList.remove('on')});hideChip();save({joined:true})}
-document.addEventListener('keydown',function(e){if(e.key==='Escape')closeAll(7)});
-document.addEventListener('click',function(e){
-var t=e.target;
-if(t&&t.closest&&t.closest('#gldpj-min')){openAll();return}
-if(!isOpen())return;
-if(t&&t.id==='gldpj'){closeAll(7);return}
-if(!t||!t.closest)return;
-if(t.closest('#gldpj .pj-x')){closeAll(7);return}
-if(t.closest('#gldpj .pj-no')){closeAll(14);return}
-if(t.closest('#gldpj .pj-ok')){boxes().forEach(function(b){b.style.display='none'});joined();return}
-},true);
-document.addEventListener('submit',function(e){
-var f=e.target;
-if(!f||!f.classList||!f.classList.contains('pj-f'))return;
-e.preventDefault();
-var card=f.closest('.pj-card')||document;
-var err=card.querySelector('.pj-err'),btn=f.querySelector('.pj-btn');
-var email=(f.querySelector('input[name=email]').value||'').trim();
-var name=(f.querySelector('input[name=name]').value||'').trim();
-var hp=(f.querySelector('input[name=website]').value||'');
-if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){err.textContent='Please enter a valid email.';err.style.display='block';return}
-err.style.display='none';btn.disabled=true;btn.textContent='Sending\u2026';
-fetch(GLDPJ_REST,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,email:email,website:hp})})
-.then(function(r){return r.json().then(function(b){return{ok:r.ok,body:b}})})
-.then(function(r){
-if(r.ok){card.querySelector('.pj-mail').textContent=email;card.querySelector('.pj-main').style.display='none';card.querySelector('.pj-done').style.display='block';joined();boxes().forEach(function(b){b.style.display='flex'})}
-else{err.textContent=(r.body&&r.body.message)||'Something went sideways. Please try again.';err.style.display='block';btn.disabled=false;btn.textContent='I\u2019M IN \u2726'}
-})
-.catch(function(){err.textContent='Could not reach us. Please try again.';err.style.display='block';btn.disabled=false;btn.textContent='I\u2019M IN \u2726'});
-},true);
-if(st&&st.snooze&&Date.now()<st.snooze){showChip()}
-else{setTimeout(function(){openAll()},7000)}
-})();</script>
+<script>(function(){try{var r=new URLSearchParams(location.search).get('ref');if(!r)return;r=r.replace(/[^A-Za-z0-9]/g,'').slice(0,12).toUpperCase();if(!r)return;var e=new Date(Date.now()+2592e6).toUTCString();document.cookie='galado_ref='+r+'; expires='+e+'; path=/; SameSite=Lax';}catch(e){}})();</script>
 <?php
     }
 
@@ -729,10 +682,8 @@ else{setTimeout(function(){openAll()},7000)}
                 return ['ok' => true, 'version' => self::VERSION, 'hooks' => ['transition_comment_status', 'comment_post', 'woocommerce_checkout_create_order', 'woocommerce_cart_calculate_fees', 'user_register']];
             },
         ]);
-        // Storefront join popup → Club magic link. Public (guests submit it), defended in
-        // layers: honeypot field, per-IP transient throttle here, then the Club's own
-        // per-email + per-IP + daily caps (called with the bridge secret so the real
-        // visitor IP is what gets rate-limited, not this server's).
+        // Storefront join popup -> Club magic link. Public (guests submit it), defended in
+        // layers: honeypot field, per-IP transient throttle here, then the Club's own caps.
         register_rest_route('galado-club/v1', '/popup-join', [
             'methods'             => 'POST',
             'permission_callback' => '__return_true',
@@ -1142,17 +1093,13 @@ else{setTimeout(function(){openAll()},7000)}
             . '</div>';
     }
 
-    /* ── Club join popup (2026-07-08, replaces the retired Klaviyo popup) ─────────────
-     * Guests only. Name + email → REST /popup-join → Club /api/claim/request → the Club
-     * emails a one-tap magic sign-in link (20 min TTL); claiming it creates the member,
-     * fires the welcome email, provisions the store account and starts onboarding.
-     * No voucher — the pitch is the Club itself (Buddy, games, G-Coins, member drops). */
+    /* -- Club join popup (2026-07-08, replaces the retired Klaviyo popup) -----------
+     * Guests only. Name + email -> REST /popup-join -> Club /api/claim/request -> the Club
+     * emails a one-tap magic sign-in link (20 min TTL). No voucher -- the pitch is the Club. */
 
-    /** REST: forward the popup submit to the Club with layered abuse guards. */
     public static function popup_join(WP_REST_Request $request) {
-        // Honeypot: bots fill "website"; humans never see it. Pretend success.
         if ('' !== trim((string) $request->get_param('website'))) {
-            return ['ok' => true];
+            return ['ok' => true]; // honeypot -> pretend success
         }
         $email = sanitize_email((string) $request->get_param('email'));
         $name  = sanitize_text_field((string) $request->get_param('name'));
@@ -1162,17 +1109,13 @@ else{setTimeout(function(){openAll()},7000)}
         $ip  = isset($_SERVER['REMOTE_ADDR']) ? (string) $_SERVER['REMOTE_ADDR'] : 'unknown';
         $key = 'gld_pj_' . md5($ip);
         $n   = (int) get_transient($key);
-        if ($n >= 6) { // 6 submits/hour/IP at the WP layer; the Club enforces its own caps too
+        if ($n >= 6) {
             return new WP_Error('slow_down', 'Too many tries from this connection. Please wait a while.', ['status' => 429]);
         }
         set_transient($key, $n + 1, HOUR_IN_SECONDS);
-
         $res = wp_remote_post(GALADO_CLUB_URL . '/api/claim/request', [
             'timeout' => 8,
-            'headers' => [
-                'content-type'         => 'application/json',
-                'x-club-bridge-secret' => GALADO_CLUB_BRIDGE_SECRET,
-            ],
+            'headers' => ['content-type' => 'application/json', 'x-club-bridge-secret' => GALADO_CLUB_BRIDGE_SECRET],
             'body'    => wp_json_encode(['email' => $email, 'name' => mb_substr($name, 0, 60), 'clientIp' => $ip]),
         ]);
         if (is_wp_error($res)) {
@@ -1188,13 +1131,12 @@ else{setTimeout(function(){openAll()},7000)}
         return ['ok' => true];
     }
 
-    /** The popup itself — markup, styles and behaviour, fully self-contained. */
     public static function join_popup() {
         if (is_admin() || is_user_logged_in()) {
             return;
         }
         if (function_exists('is_cart') && (is_cart() || is_checkout() || is_account_page())) {
-            return; // never interrupt buying or signing in
+            return;
         }
         $rest = esc_url_raw(rest_url('galado-club/v1/popup-join'));
         ?>
@@ -1229,7 +1171,6 @@ else{setTimeout(function(){openAll()},7000)}
 #gldpj-min img{width:30px;height:auto;display:block;margin:0 auto;}
 @media (max-width:640px){
 #gldpj-min{left:12px;bottom:12px;width:48px;height:48px;}
-
 #gldpj .pj-card{grid-template-columns:1fr;max-width:420px;}
 #gldpj .pj-vis{min-height:130px;}
 #gldpj .pj-vis .pj-b1{left:calc(50% - 120px);height:120px;}
@@ -1273,34 +1214,48 @@ else{setTimeout(function(){openAll()},7000)}
 <img src="https://club.galado.com.my/coin.png" alt="" loading="lazy"/>
 </button>
 <script>
+var GLDPJ_REST=<?php echo wp_json_encode($rest); ?>;
 (function(){
-var KEY='gldpj_v1',box=document.getElementById('gldpj');
-if(!box)return;
+if(window.__gldpjBooted)return;window.__gldpjBooted=1;
+var KEY='gldpj_v1';
+function boxes(){return [].slice.call(document.querySelectorAll('#gldpj'))}
+function chips(){return [].slice.call(document.querySelectorAll('#gldpj-min'))}
+if(!boxes().length)return;
 var st=null;try{st=JSON.parse(localStorage.getItem(KEY)||'null')}catch(e){}
 if(st&&st.joined)return;
-if(st&&st.snooze&&Date.now()<st.snooze)return;
-var main=box.querySelector('.pj-main'),done=box.querySelector('.pj-done'),form=box.querySelector('.pj-f'),err=box.querySelector('.pj-err'),btn=form.querySelector('.pj-btn');
 function save(o){try{localStorage.setItem(KEY,JSON.stringify(o))}catch(e){}}
-function close(snoozeDays){box.classList.remove('on');box.style.display='none';if(snoozeDays)save({snooze:Date.now()+snoozeDays*864e5});document.removeEventListener('keydown',esc)}
-function esc(e){if(e.key==='Escape')close(7)}
-box.addEventListener('click',function(e){if(e.target===box)close(7)});
-box.querySelector('.pj-x').addEventListener('click',function(){close(7)});
-box.querySelector('.pj-no').addEventListener('click',function(){close(14)});
-box.querySelector('.pj-ok').addEventListener('click',function(){close(0)});
-form.addEventListener('submit',function(e){
+function isOpen(){return boxes().some(function(b){return b.style.display==='flex'})}
+function showChip(){chips().forEach(function(c){c.style.display='flex'})}
+function hideChip(){chips().forEach(function(c){c.style.display='none'})}
+function openAll(){boxes().forEach(function(b){b.classList.add('on');b.style.display='flex'});hideChip()}
+function closeAll(d){if(!isOpen())return;boxes().forEach(function(b){b.classList.remove('on');b.style.display='none'});showChip();if(d)save({snooze:Date.now()+d*864e5})}
+function joined(){hideChip();save({joined:true})}
+document.addEventListener('keydown',function(e){if(e.key==='Escape')closeAll(7)});
+document.addEventListener('click',function(e){
+var t=e.target;if(!t)return;
+if(t.closest&&t.closest('#gldpj-min')){openAll();return}
+if(!isOpen())return;
+if(t.id==='gldpj'){closeAll(7);return}
+if(!t.closest)return;
+if(t.closest('#gldpj .pj-x')){closeAll(7);return}
+if(t.closest('#gldpj .pj-no')){closeAll(14);return}
+if(t.closest('#gldpj .pj-ok')){boxes().forEach(function(b){b.style.display='none'});joined();return}
+},true);
+document.addEventListener('submit',function(e){
+var f=e.target;if(!f||!f.classList||!f.classList.contains('pj-f'))return;
 e.preventDefault();
-var email=(form.email.value||'').trim();
+var card=f.closest('.pj-card')||document,err=card.querySelector('.pj-err'),btn=f.querySelector('.pj-btn');
+var email=(f.querySelector('input[name=email]').value||'').trim();
+var name=(f.querySelector('input[name=name]').value||'').trim();
+var hp=(f.querySelector('input[name=website]').value||'');
 if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){err.textContent='Please enter a valid email.';err.style.display='block';return}
-err.style.display='none';btn.disabled=true;btn.textContent='Sending…';
-fetch(<?php echo wp_json_encode($rest); ?>,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:(form.name.value||'').trim(),email:email,website:form.website.value||''})})
+err.style.display='none';btn.disabled=true;btn.textContent='Sending...';
+fetch(GLDPJ_REST,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,email:email,website:hp})})
 .then(function(r){return r.json().then(function(b){return{ok:r.ok,body:b}})})
-.then(function(r){
-if(r.ok){box.querySelector('.pj-mail').textContent=email;main.style.display='none';done.style.display='block';save({joined:true})}
-else{err.textContent=(r.body&&r.body.message)||'Something went sideways. Please try again.';err.style.display='block';btn.disabled=false;btn.textContent='I’M IN ✦'}
-})
-.catch(function(){err.textContent='Could not reach us. Please try again.';err.style.display='block';btn.disabled=false;btn.textContent='I’M IN ✦'});
-});
-setTimeout(function(){box.classList.add('on');box.style.display='flex'},7000);
+.then(function(r){if(r.ok){card.querySelector('.pj-mail').textContent=email;card.querySelector('.pj-main').style.display='none';card.querySelector('.pj-done').style.display='block';joined()}else{err.textContent=(r.body&&r.body.message)||'Something went sideways. Please try again.';err.style.display='block';btn.disabled=false;btn.textContent='JOIN'}})
+.catch(function(){err.textContent='Could not reach us. Please try again.';err.style.display='block';btn.disabled=false;btn.textContent='JOIN'});
+},true);
+if(st&&st.snooze&&Date.now()<st.snooze){showChip()}else{setTimeout(openAll,7000)}
 })();
 </script>
 <?php
