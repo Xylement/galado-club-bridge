@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.20.0
+ * Version: 0.21.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.20.0';
+    const VERSION  = '0.21.0';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -705,7 +705,7 @@ final class Galado_Club_Bridge {
         echo '<table cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:16px 0;"><tr><td style="background:#F5F5F3;border:1px solid #ECECEA;border-radius:16px;padding:22px;font-family:Arial,Helvetica,sans-serif;color:#111111;">'
            . '<div style="font-size:18px;font-weight:bold;margin-bottom:8px;">Track your G-Coins from your lock screen</div>'
            . '<div style="font-size:14px;line-height:1.5;color:#4A4A4A;margin-bottom:16px;">Add your GALADO Club Card to your phone Wallet: your coins, your member barcode, and first dibs on drops. <strong style="color:#111111;">Worth 150 G-Coins the moment you add it.</strong></div>'
-           . '<a href="' . $url . '" style="display:inline-block;background:#111111;color:#ffffff;font-weight:bold;font-size:14px;text-decoration:none;padding:12px 26px;border-radius:999px;">Add my Club Card &rarr;</a>'
+           . '<a href="' . $url . '" style="display:inline-block;text-decoration:none;"><img src="https://galado.com.my/gld-files/uploads/2026/07/gld-add-to-apple-wallet.png" alt="Add to Apple Wallet" width="149" height="46" style="display:block;border:0;height:46px;width:149px;"></a>'
            . ($live ? '' : '<div style="font-size:11px;color:#8C8C8C;margin-top:12px;">Preview (admin recipients only) &mdash; hidden from buyers until launch.</div>')
            . '</td></tr></table>';
     }
