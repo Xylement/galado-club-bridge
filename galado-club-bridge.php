@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.21.0';
+    const VERSION  = '0.22.0';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -683,6 +683,15 @@ final class Galado_Club_Bridge {
         return add_query_arg(['o' => $order_id, 's' => $sig], rest_url('galado-club/v1/wallet-add'));
     }
 
+    /** Signed, no-login wallet-add link keyed to a MEMBER email (welcome series / lifecycle emails,
+     *  where there is no order). HMAC ties it to the lowercased email so it can only add that member's
+     *  own pass. Klaviyo stores this per profile as {{ person.wallet_add_url }}. */
+    private static function wallet_add_url_member($email) {
+        $email = strtolower(trim((string) $email));
+        $sig   = hash_hmac('sha256', 'walletaddm:' . $email, self::sso_secret());
+        return add_query_arg(['m' => $email, 's' => $sig], rest_url('galado-club/v1/wallet-add'));
+    }
+
     /** Order-confirmation email "Add to Wallet" block. Customer emails only; dark unless launched
      *  OR the recipient is a WP admin (so Clement can preview by resending himself an order email). */
     public static function wallet_add_email_block($order, $sent_to_admin = false, $plain_text = false, $email = null) {
@@ -713,16 +722,31 @@ final class Galado_Club_Bridge {
     /** No-login redirect target for the email button: verify HMAC, detect the device, resolve the
      *  buyer's pass, and 302 to the add sheet (Apple .pkpass / Google save). */
     public static function wallet_add_redirect(WP_REST_Request $request) {
-        $order_id = (int) $request->get_param('o');
-        $sig      = (string) $request->get_param('s');
-        $expect   = hash_hmac('sha256', 'walletadd:' . $order_id, self::sso_secret());
-        if (!$order_id || '' === $sig || !hash_equals($expect, $sig)) {
-            wp_die('This add-to-Wallet link is invalid or expired.', 'GALADO Club', ['response' => 400]);
-        }
-        $order = wc_get_order($order_id);
-        $email = $order ? $order->get_billing_email() : '';
-        if (!$email) {
-            wp_die('We could not find your order.', 'GALADO Club', ['response' => 404]);
+        $sig = (string) $request->get_param('s');
+        $m   = strtolower(trim((string) $request->get_param('m')));
+        $customer_id = 0;
+        if ('' !== $m) {
+            // Member-email mode (welcome series / lifecycle emails — no order in play).
+            $expect = hash_hmac('sha256', 'walletaddm:' . $m, self::sso_secret());
+            if ('' === $sig || !hash_equals($expect, $sig) || !is_email($m)) {
+                wp_die('This add-to-Wallet link is invalid or expired.', 'GALADO Club', ['response' => 400]);
+            }
+            $email   = sanitize_email($m);
+            $wp_user = get_user_by('email', $email);
+            $customer_id = $wp_user ? (int) $wp_user->ID : 0;
+        } else {
+            // Order mode (order-confirmation email — HMAC tied to the order id).
+            $order_id = (int) $request->get_param('o');
+            $expect   = hash_hmac('sha256', 'walletadd:' . $order_id, self::sso_secret());
+            if (!$order_id || '' === $sig || !hash_equals($expect, $sig)) {
+                wp_die('This add-to-Wallet link is invalid or expired.', 'GALADO Club', ['response' => 400]);
+            }
+            $order = wc_get_order($order_id);
+            $email = $order ? $order->get_billing_email() : '';
+            $customer_id = $order ? (int) $order->get_customer_id() : 0;
+            if (!$email) {
+                wp_die('We could not find your order.', 'GALADO Club', ['response' => 404]);
+            }
         }
         $ua         = isset($_SERVER['HTTP_USER_AGENT']) ? (string) $_SERVER['HTTP_USER_AGENT'] : '';
         $is_ios     = (bool) preg_match('/iPhone|iPod/i', $ua);
@@ -730,7 +754,7 @@ final class Galado_Club_Bridge {
         if (!$is_ios && !$is_android) {
             wp_die('Open this link on your phone to add your GALADO Club Card to your Wallet.', 'GALADO Club', ['response' => 200]);
         }
-        $summary = self::fetch_summary($email, $order->get_customer_id());
+        $summary = self::fetch_summary($email, $customer_id);
         $tier    = ($summary && isset($summary['tier'])) ? $summary['tier'] : 'silver';
         $payload = ['email' => $email, 'tier' => $tier];
         $r = $is_ios ? self::wallet_post('/issue', $payload) : self::wallet_post('/google/save-link', $payload);
@@ -739,6 +763,25 @@ final class Galado_Club_Bridge {
         }
         wp_redirect($r['url'], 302);
         exit;
+    }
+
+    /** Bridge-secret batch signer: given member emails, return their signed wallet-add links.
+     *  Lets the Klaviyo sync populate {{ person.wallet_add_url }} without ever seeing the SSO
+     *  secret (it stays in WordPress). POST { "emails": [...] } or { "email": "..." }. */
+    public static function wallet_add_link_batch(WP_REST_Request $request) {
+        $emails = $request->get_param('emails');
+        if (!is_array($emails)) {
+            $one    = (string) $request->get_param('email');
+            $emails = '' !== $one ? [$one] : [];
+        }
+        $links = [];
+        foreach (array_slice($emails, 0, 1000) as $e) {
+            $e = strtolower(trim((string) $e));
+            if (is_email($e) && !isset($links[$e])) {
+                $links[$e] = self::wallet_add_url_member($e);
+            }
+        }
+        return ['links' => $links, 'count' => count($links)];
     }
 
     public static function thankyou_block($order_id) {
@@ -816,11 +859,18 @@ final class Galado_Club_Bridge {
             'permission_callback' => '__return_true',
             'callback'            => [__CLASS__, 'popup_join'],
         ]);
-        // No-login "Add to Wallet" redirect for the order-confirmation email (HMAC-signed per order).
+        // No-login "Add to Wallet" redirect for order-confirmation (?o=) AND welcome/lifecycle
+        // emails (?m=member email). HMAC-signed either way; verified inside the callback.
         register_rest_route('galado-club/v1', '/wallet-add', [
             'methods'             => 'GET',
             'permission_callback' => '__return_true',
             'callback'            => [__CLASS__, 'wallet_add_redirect'],
+        ]);
+        // Bridge-secret batch signer used by the Klaviyo sync to fill {{ person.wallet_add_url }}.
+        register_rest_route('galado-club/v1', '/wallet-add-link', [
+            'methods'             => 'POST',
+            'permission_callback' => [__CLASS__, 'bridge_auth'],
+            'callback'            => [__CLASS__, 'wallet_add_link_batch'],
         ]);
         register_rest_route('galado-club/v1', '/tier', [
             'methods'             => 'POST',
