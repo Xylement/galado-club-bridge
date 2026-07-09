@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.18.0
+ * Version: 0.19.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.18.0';
+    const VERSION  = '0.19.0';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -46,6 +46,8 @@ final class Galado_Club_Bridge {
         // On-site activation (post-payment + account only — never before checkout):
         add_action('woocommerce_account_dashboard', [__CLASS__, 'dashboard_card']);
         add_action('woocommerce_thankyou', [__CLASS__, 'thankyou_block']);
+        // Order-confirmation email "Add to Wallet" block (customer emails only; dark until launch).
+        add_action('woocommerce_email_after_order_table', [__CLASS__, 'wallet_add_email_block'], 25, 4);
         add_action('rest_api_init', [__CLASS__, 'rest_routes']);
         // Two-way account link: a new galado.com.my registration also creates the Club member.
         add_action('user_register', [__CLASS__, 'on_user_register'], 20, 1);
@@ -683,6 +685,70 @@ final class Galado_Club_Bridge {
 
     /** Order-received (Thank-you) page: celebrate the coins just earned + send them in.
      *  Fires only AFTER payment, so it never distracts from checkout. */
+    /** Signed, no-login wallet-add link for the confirmation email (HMAC ties it to the order). */
+    private static function wallet_add_url($order_id) {
+        $sig = hash_hmac('sha256', 'walletadd:' . $order_id, self::sso_secret());
+        return add_query_arg(['o' => $order_id, 's' => $sig], rest_url('galado-club/v1/wallet-add'));
+    }
+
+    /** Order-confirmation email "Add to Wallet" block. Customer emails only; dark unless launched
+     *  OR the recipient is a WP admin (so Clement can preview by resending himself an order email). */
+    public static function wallet_add_email_block($order, $sent_to_admin = false, $plain_text = false, $email = null) {
+        if ($sent_to_admin || $plain_text || !is_a($order, 'WC_Order')) {
+            return;
+        }
+        $eid = is_object($email) && isset($email->id) ? $email->id : '';
+        if ($eid && !in_array($eid, ['customer_processing_order', 'customer_completed_order', 'customer_on_hold_order'], true)) {
+            return;
+        }
+        $live  = defined('GALADO_WALLET_ADD_LIVE') && GALADO_WALLET_ADD_LIVE;
+        $buyer = $order->get_user(); // WP_User or false
+        if (!$buyer) {
+            return; // guest checkout — join flows handle them, no pass to add
+        }
+        if (!$live && !user_can($buyer, 'manage_options')) {
+            return; // dark: only shows in emails to admin recipients while previewing
+        }
+        $url = esc_url(self::wallet_add_url($order->get_id()));
+        echo '<table cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:16px 0;"><tr><td style="background:#F5F5F3;border:1px solid #ECECEA;border-radius:16px;padding:22px;font-family:Arial,Helvetica,sans-serif;color:#111111;">'
+           . '<div style="font-size:18px;font-weight:bold;margin-bottom:8px;">Track your G-Coins from your lock screen</div>'
+           . '<div style="font-size:14px;line-height:1.5;color:#4A4A4A;margin-bottom:16px;">Add your GALADO Club Card to your phone Wallet: your coins, your member barcode, and first dibs on drops. <strong style="color:#111111;">Worth 150 G-Coins the moment you add it.</strong></div>'
+           . '<a href="' . $url . '" style="display:inline-block;background:#111111;color:#ffffff;font-weight:bold;font-size:14px;text-decoration:none;padding:12px 26px;border-radius:999px;">Add my Club Card &rarr;</a>'
+           . ($live ? '' : '<div style="font-size:11px;color:#8C8C8C;margin-top:12px;">Preview (admin recipients only) &mdash; hidden from buyers until launch.</div>')
+           . '</td></tr></table>';
+    }
+
+    /** No-login redirect target for the email button: verify HMAC, detect the device, resolve the
+     *  buyer's pass, and 302 to the add sheet (Apple .pkpass / Google save). */
+    public static function wallet_add_redirect(WP_REST_Request $request) {
+        $order_id = (int) $request->get_param('o');
+        $sig      = (string) $request->get_param('s');
+        $expect   = hash_hmac('sha256', 'walletadd:' . $order_id, self::sso_secret());
+        if (!$order_id || '' === $sig || !hash_equals($expect, $sig)) {
+            wp_die('This add-to-Wallet link is invalid or expired.', 'GALADO Club', ['response' => 400]);
+        }
+        $order = wc_get_order($order_id);
+        $email = $order ? $order->get_billing_email() : '';
+        if (!$email) {
+            wp_die('We could not find your order.', 'GALADO Club', ['response' => 404]);
+        }
+        $ua         = isset($_SERVER['HTTP_USER_AGENT']) ? (string) $_SERVER['HTTP_USER_AGENT'] : '';
+        $is_ios     = (bool) preg_match('/iPhone|iPod/i', $ua);
+        $is_android = !$is_ios && (bool) preg_match('/Android/i', $ua);
+        if (!$is_ios && !$is_android) {
+            wp_die('Open this link on your phone to add your GALADO Club Card to your Wallet.', 'GALADO Club', ['response' => 200]);
+        }
+        $summary = self::fetch_summary($email, $order->get_customer_id());
+        $tier    = ($summary && isset($summary['tier'])) ? $summary['tier'] : 'silver';
+        $payload = ['email' => $email, 'tier' => $tier];
+        $r = $is_ios ? self::wallet_post('/issue', $payload) : self::wallet_post('/google/save-link', $payload);
+        if (!$r || empty($r['url'])) {
+            wp_die('Your card is not ready yet &mdash; please try again in a moment.', 'GALADO Club', ['response' => 502]);
+        }
+        wp_redirect($r['url'], 302);
+        exit;
+    }
+
     public static function thankyou_block($order_id) {
         // Hide third-party social-login "link your account" buttons on the order-received page.
         echo '<style>.woocommerce-order-received .social-login,.woocommerce-order-received .wc-social-login,.woocommerce-order-received .nsl-container{display:none!important;}</style>';
@@ -757,6 +823,12 @@ final class Galado_Club_Bridge {
             'methods'             => 'POST',
             'permission_callback' => '__return_true',
             'callback'            => [__CLASS__, 'popup_join'],
+        ]);
+        // No-login "Add to Wallet" redirect for the order-confirmation email (HMAC-signed per order).
+        register_rest_route('galado-club/v1', '/wallet-add', [
+            'methods'             => 'GET',
+            'permission_callback' => '__return_true',
+            'callback'            => [__CLASS__, 'wallet_add_redirect'],
         ]);
         register_rest_route('galado-club/v1', '/tier', [
             'methods'             => 'POST',
