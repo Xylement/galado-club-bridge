@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.17.7
+ * Version: 0.18.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.17.7';
+    const VERSION  = '0.18.0';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -218,6 +218,69 @@ final class Galado_Club_Bridge {
 
     private static function bridge_secret() {
         return defined('GALADO_CLUB_BRIDGE_SECRET') ? GALADO_CLUB_BRIDGE_SECRET : '';
+    }
+
+    /** Wallet service base (pos.galado.com.my/wallet). Same shared bridge secret as the Club. */
+    private static function wallet_url() {
+        return defined('GALADO_WALLET_URL') ? rtrim(GALADO_WALLET_URL, '/') : 'https://pos.galado.com.my/wallet';
+    }
+
+    /** Server-to-server POST to the wallet service (bridge secret). Returns decoded body or null. */
+    private static function wallet_post($path, $body) {
+        $secret = self::bridge_secret();
+        if ('' === $secret) {
+            return null;
+        }
+        $res = wp_remote_post(self::wallet_url() . $path, [
+            'timeout' => 6,
+            'headers' => ['content-type' => 'application/json', 'x-club-bridge-secret' => $secret],
+            'body'    => wp_json_encode($body),
+        ]);
+        if (is_wp_error($res) || (int) wp_remote_retrieve_response_code($res) >= 300) {
+            return null;
+        }
+        $data = json_decode(wp_remote_retrieve_body($res), true);
+        return is_array($data) ? $data : null;
+    }
+
+    /**
+     * "Add to Wallet" surface for the order-received page — member-only, one badge by device,
+     * resolving the buyer's own Club pass so it's one tap. DARK by default: only renders for
+     * admins (so Clement can vet it on a real order) until GALADO_WALLET_ADD_LIVE is defined true.
+     * The 150 G-Coins land on the CONFIRMED add (wallet → Club /api/pos/wallet-adopt), never here.
+     */
+    private static function wallet_add_block($email, $summary) {
+        $live = defined('GALADO_WALLET_ADD_LIVE') && GALADO_WALLET_ADD_LIVE;
+        if (!$live && !current_user_can('manage_options')) {
+            return; // dark for real buyers until the launch flag is flipped
+        }
+        $ua = isset($_SERVER['HTTP_USER_AGENT']) ? (string) $_SERVER['HTTP_USER_AGENT'] : '';
+        $is_ios = (bool) preg_match('/iPhone|iPod/i', $ua);
+        $is_android = !$is_ios && (bool) preg_match('/Android/i', $ua);
+        if (!$is_ios && !$is_android) {
+            return; // desktop / other — the add sheet is phone-only; show nothing
+        }
+        $tier = ($summary && isset($summary['tier'])) ? $summary['tier'] : 'silver';
+        $payload = ['email' => $email, 'tier' => $tier];
+        if ($is_ios) {
+            $r = self::wallet_post('/issue', $payload);
+            $label = 'Add to Apple Wallet';
+        } else {
+            $r = self::wallet_post('/google/save-link', $payload);
+            $label = 'Save to Google Wallet';
+        }
+        if (!$r || empty($r['url'])) {
+            return; // wallet unreachable / not a member pass — fail quietly
+        }
+        $url = esc_url($r['url']);
+        echo '<section style="border:1px solid #ECECEA;border-radius:20px;padding:24px;background:#F5F5F3;margin:24px 0;font-family:\'Inter\',sans-serif;color:#111111;box-shadow:0 4px 16px rgba(17,17,17,.06);">';
+        echo '<h2 style="margin-top:0;font-family:\'Archivo\',sans-serif;font-weight:800;color:#111111;letter-spacing:-.02em;">' . self::coin_icon() . 'Track this order&rsquo;s G-Coins from your lock screen</h2>';
+        echo '<p style="margin:0 0 16px;">Add your GALADO Club Card to your Wallet: your coins, your member barcode, and first dibs on drops, all in one tap. <strong>Worth 150 G-Coins the moment you add it.</strong></p>';
+        echo '<a href="' . $url . '" style="display:inline-flex;align-items:center;gap:.5em;background:#111111;color:#fff;font-family:\'Archivo\',sans-serif;font-weight:700;font-size:.95rem;padding:.85em 1.7em;border-radius:999px;text-decoration:none;">' . esc_html($label) . ' &rarr;</a>';
+        if (!$live) {
+            echo '<p style="margin:12px 0 0;font-size:12px;color:#8C8C8C;">Preview (admins only) &middot; hidden from buyers until launch.</p>';
+        }
+        echo '</section>';
     }
 
     /** Shared permission check for all server-to-server bridge routes. */
@@ -670,6 +733,12 @@ final class Galado_Club_Bridge {
             echo self::cta_pill(self::club_url(), $earned ? 'Claim my G-Coins' : 'Join GALADO Club');
         }
         echo '</section>';
+
+        // Add-to-Wallet (member-only, one badge by device, dark until launch). The 150-coin
+        // bonus is credited by the wallet on the CONFIRMED add, not by this surface.
+        if ($user) {
+            self::wallet_add_block($user->user_email, $summary);
+        }
     }
 
     /** Club -> WP: mirror tier into user meta (Klaviyo segments + early-access gate). */
