@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.23.0';
+    const VERSION  = '0.24.0';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -1328,9 +1328,12 @@ final class Galado_Club_Bridge {
 #gldpj{position:fixed;inset:0;z-index:999999;align-items:center;justify-content:center;padding:18px;background:rgba(17,17,17,.45);overflow:auto;}
 #gldpj.on{display:flex;}
 #gldpj .pj-card{position:relative;width:100%;max-width:440px;margin:auto;background:#fff;border-radius:20px;overflow:hidden;box-shadow:0 24px 70px rgba(17,17,17,.28);font-family:'Inter',-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;}
-#gldpj .pj-vis{position:relative;min-height:196px;background:#FFF4EC;background-image:radial-gradient(rgba(228,0,43,.15) 3px,transparent 3px),radial-gradient(rgba(255,201,60,.32) 2.5px,transparent 2.5px);background-size:34px 34px,26px 26px;background-position:0 0,13px 17px;}
+#gldpj .pj-vis{position:relative;overflow:hidden;min-height:210px;background:#FBF1F0;background-image:radial-gradient(130% 118% at 40% -2%,#FEF8F7 0%,#FBEBEA 52%,#F2DAD9 100%);}
 #gldpj .pj-vis .b{position:absolute;bottom:0;width:auto;}
-#gldpj .pj-vis .pj-coin{width:26px;top:15px;left:44%;opacity:.9;}
+#gldpj .pj-phone{position:absolute;left:20px;bottom:-52px;width:150px;border-radius:22px;overflow:hidden;background:#fff;border:5px solid #111111;box-shadow:0 12px 30px rgba(17,17,17,.30);transform:rotate(-5deg);}
+#gldpj .pj-phone img{display:block;width:100%;}
+#gldpj .pj-vis .pjb1{right:6px;height:170px;z-index:3;}
+#gldpj .pj-vis .pjb2{right:78px;height:138px;z-index:2;}
 #gldpj .pj-form{padding:24px 26px 22px;}
 #gldpj .pj-eyebrow{text-align:center;font-family:'Archivo','Arial Black',Arial,sans-serif;font-weight:700;font-size:11px;letter-spacing:2px;color:#E4002B;text-transform:uppercase;}
 #gldpj h2{margin:8px 0 16px;text-align:center;font-family:'Archivo','Arial Black',Arial,sans-serif;font-weight:900;font-size:26px;line-height:1.06;letter-spacing:-.5px;color:#111111;text-transform:uppercase;}
@@ -1357,8 +1360,10 @@ final class Galado_Club_Bridge {
 #gldpj-min img{width:30px;height:auto;display:block;margin:0 auto;}
 @media (max-width:640px){
 #gldpj-min{left:12px;bottom:12px;width:48px;height:48px;}
-#gldpj .pj-vis{min-height:172px;}
-#gldpj .pj-vis .b{height:88%;}
+#gldpj .pj-vis{min-height:196px;}
+#gldpj .pj-phone{width:140px;}
+#gldpj .pj-vis .pjb1{height:158px;}
+#gldpj .pj-vis .pjb2{height:128px;}
 #gldpj h2{font-size:24px;}
 #gldpj .pj-form{padding:22px 20px 18px;}
 }
@@ -1366,13 +1371,9 @@ final class Galado_Club_Bridge {
 <div class="pj-card">
 <button type="button" class="pj-x" aria-label="Close">&times;</button>
 <div class="pj-vis" aria-hidden="true">
-<img class="b" style="left:-2%;height:150px;z-index:1" src="https://club.galado.com.my/avatar-boy-outfit-the-locals-cut.png" alt="" loading="lazy"/>
-<img class="b" style="left:14%;height:170px;z-index:2" src="https://club.galado.com.my/avatar-girl-outfit-deepavali-cut.png" alt="" loading="lazy"/>
-<img class="b" style="left:30%;height:186px;z-index:3" src="https://club.galado.com.my/avatar-boy-outfit-baju-raya-cut.png" alt="" loading="lazy"/>
-<img class="b" style="left:47%;height:190px;z-index:4" src="https://club.galado.com.my/avatar-girl-outfit-cny-cut.png" alt="" loading="lazy"/>
-<img class="b" style="left:64%;height:172px;z-index:3" src="https://club.galado.com.my/avatar-boy-outfit-futuristic-cut.png" alt="" loading="lazy"/>
-<img class="b" style="left:80%;height:156px;z-index:2" src="https://club.galado.com.my/avatar-girl-outfit-royals-cut.png" alt="" loading="lazy"/>
-<img class="b pj-coin" src="https://club.galado.com.my/coin.png" alt="" loading="lazy"/>
+<div class="pj-phone"><img src="https://galado.com.my/gld-files/uploads/2026/07/club-rewards-preview.jpg" alt="" loading="lazy"/></div>
+<img class="b pjb2" src="https://club.galado.com.my/avatar-boy-outfit-baju-raya-cut.png" alt="" loading="lazy"/>
+<img class="b pjb1" src="https://club.galado.com.my/avatar-girl-outfit-cny-cut.png" alt="" loading="lazy"/>
 </div>
 <div class="pj-form">
 <div class="pj-main">
