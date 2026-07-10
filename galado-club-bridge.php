@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.22.0';
+    const VERSION  = '0.23.0';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -1339,15 +1339,6 @@ final class Galado_Club_Bridge {
 #gldpj .pj-pk{width:26px;height:26px;flex:none;border-radius:8px;display:flex;align-items:center;justify-content:center;background:#FFF0F2;color:#E4002B;}
 #gldpj .pj-pk svg{width:15px;height:15px;}
 #gldpj .pj-pk img{width:17px;height:17px;}
-#gldpj .pj-ladder{margin:0 0 18px;padding:14px 14px 12px;background:#FAF8F6;border:1px solid #E6E4E1;border-radius:14px;}
-#gldpj .pj-ladder-h{font-size:10px;letter-spacing:1.6px;text-transform:uppercase;color:#8C8C8C;font-weight:800;margin:0 0 10px;text-align:center;}
-#gldpj .pj-steps{display:flex;align-items:flex-start;}
-#gldpj .pj-step{flex:1;text-align:center;position:relative;}
-#gldpj .pj-step .pj-dot{display:block;width:10px;height:10px;border-radius:50%;margin:0 auto 7px;position:relative;z-index:2;}
-#gldpj .pj-step .pj-nm{font-size:10.5px;font-weight:800;color:#111111;letter-spacing:.2px;}
-#gldpj .pj-step .pj-off{font-size:14px;font-weight:900;color:#111111;margin-top:2px;font-family:'Archivo','Arial Black',Arial,sans-serif;}
-#gldpj .pj-step .pj-off.red{color:#E4002B;}
-#gldpj .pj-step:not(:last-child):after{content:"";position:absolute;top:4px;left:55%;width:90%;height:2px;background:#E2DFDA;z-index:1;}
 #gldpj input[type=text],#gldpj input[type=email]{display:block;width:100%;box-sizing:border-box;border:0;border-bottom:2px solid #D9D9D9;padding:10px 2px;margin:0 0 12px;font-size:15px;color:#111;background:transparent;outline:none;border-radius:0;}
 #gldpj input:focus{border-bottom-color:#111111;}
 #gldpj .pj-hp{position:absolute;left:-9999px;opacity:0;height:0;width:0;}
@@ -1388,19 +1379,11 @@ final class Galado_Club_Bridge {
 <div class="pj-eyebrow">GALADO Club &middot; Free to join</div>
 <h2 id="gldpj-title">Meet the Club</h2>
 <ul class="pj-perks">
-<li><span class="pj-pk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 21s-7-4.5-7-10a4 4 0 0 1 7-2.5A4 4 0 0 1 19 11c0 5.5-7 10-7 10z"/></svg></span>Adopt &amp; dress up your own Buddy</li>
-<li><span class="pj-pk"><img src="https://club.galado.com.my/coin.png" alt=""/></span>Earn G-Coins on every order</li>
-<li><span class="pj-pk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 12h4M9 10v4M16 11h.01M18 13h.01"/></svg></span>Daily games, Spin &amp; member-only drops</li>
+<li><span class="pj-pk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M8.3 12.2l2.4 2.4 5-5.2"/></svg></span>Free Lifetime Membership</li>
+<li><span class="pj-pk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L2.5 12.5A2 2 0 0 1 2 11.1V4a2 2 0 0 1 2-2h7.1a2 2 0 0 1 1.4.6l7.1 7.1a2 2 0 0 1 0 2.7z"/><circle cx="7" cy="7" r="1.3"/></svg></span>Up to 15% off for members</li>
+<li><span class="pj-pk"><img src="https://club.galado.com.my/coin.png" alt=""/></span>Rewards on every order</li>
+<li><span class="pj-pk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 12v9H4v-9M2 8h20v4H2zM12 8v13M12 8S10.7 4 8 4a2 2 0 1 0 0 4h4zM12 8s1.3-4 4-4a2 2 0 1 1 0 4h-4z"/></svg></span>Early access &amp; surprises</li>
 </ul>
-<div class="pj-ladder">
-<div class="pj-ladder-h">Level up as you shop</div>
-<div class="pj-steps">
-<div class="pj-step"><span class="pj-dot" style="background:#9AA7B5"></span><div class="pj-nm">Silver</div><div class="pj-off">Join</div></div>
-<div class="pj-step"><span class="pj-dot" style="background:#E9A93D"></span><div class="pj-nm">Gold</div><div class="pj-off red">5% off</div></div>
-<div class="pj-step"><span class="pj-dot" style="background:#6FC7E8"></span><div class="pj-nm">Diamond</div><div class="pj-off red">10% off</div></div>
-<div class="pj-step"><span class="pj-dot" style="background:#2E2630"></span><div class="pj-nm">Black</div><div class="pj-off red">15% off</div></div>
-</div>
-</div>
 <form class="pj-f" novalidate onsubmit="return false">
 <input type="text" name="name" placeholder="Your name" maxlength="60" autocomplete="given-name"/>
 <input type="email" name="email" placeholder="Email" maxlength="254" required autocomplete="email"/>
