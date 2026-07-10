@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.21.0
+ * Version: 0.25.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.24.0';
+    const VERSION  = '0.25.0';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -86,6 +86,9 @@ final class Galado_Club_Bridge {
         add_filter('woocommerce_email_subject_customer_completed_order', [__CLASS__, 'pos_email_subject'], 10, 2);
         add_filter('woocommerce_email_heading_customer_completed_order', [__CLASS__, 'pos_email_heading'], 10, 2);
         add_action('woocommerce_email_before_order_table', [__CLASS__, 'pos_email_intro'], 10, 4);
+        // Background worker for the POS receipt email, queued by /order-email so the POS
+        // never waits on SMTP (must be registered on every request for Action Scheduler).
+        add_action('galado_pos_order_email_job', [__CLASS__, 'pos_order_email_job'], 10, 1);
         // The "Hide Checkout Shipping Address" plugin fatals on any programmatic order
         // creation (its woocommerce_new_order handler reads WC_Checkout->shipping_method,
         // which calls WC()->session->get() — null outside a real browser checkout). Detach
@@ -139,13 +142,32 @@ final class Galado_Club_Bridge {
         if (!$order->get_billing_email()) {
             return new WP_Error('no_email', 'order has no email — provide one', ['status' => 400]);
         }
+        // Queue the render + SMTP send (Action Scheduler ships with WooCommerce) so the
+        // POS gets its answer in milliseconds instead of waiting out the mail server (a
+        // slow SMTP day held the Send button for 11s). The recipient is already saved on
+        // the order, so the job only needs the id. Inline send stays as the fallback.
+        if (function_exists('as_enqueue_async_action')) {
+            as_enqueue_async_action('galado_pos_order_email_job', [$order->get_id()], 'galado-pos');
+            return ['ok' => true, 'sent_to' => $order->get_billing_email(), 'queued' => true];
+        }
+        self::pos_order_email_job($order->get_id());
+        return ['ok' => true, 'sent_to' => $order->get_billing_email(), 'queued' => false];
+    }
+
+    /** Action Scheduler worker: the actual receipt render + send, off the POS request path. */
+    public static function pos_order_email_job($order_id) {
+        $order = wc_get_order(absint($order_id));
+        if (!$order || !$order->get_billing_email()) {
+            return;
+        }
+        // This runs in its own request, so the suppression override must be re-asserted
+        // here: without it pos_suppress_email would block this send for a POS order.
         self::$pos_email_override = true;
         $emails = WC()->mailer()->get_emails();
         if (isset($emails['WC_Email_Customer_Completed_Order'])) {
-            $emails['WC_Email_Customer_Completed_Order']->trigger($order_id);
+            $emails['WC_Email_Customer_Completed_Order']->trigger($order->get_id());
         }
         self::$pos_email_override = false;
-        return ['ok' => true, 'sent_to' => $order->get_billing_email()];
     }
 
     public static function pos_email_subject($subject, $order = null) {

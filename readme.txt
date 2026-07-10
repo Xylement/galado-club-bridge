@@ -17,6 +17,9 @@ push-to-Xylement/galado-club-bridge (WP Git Sync), NOT the zips in this folder
 (the v0.2.x zips are obsolete manual-upload relics — do not deploy them).
 
 == Changelog ==
+= 0.25.0 =
+* POS receipt email is queued via Action Scheduler instead of sent inline: the POS
+  Send button answers instantly even when SMTP is slow (inline send kept as fallback).
 = 0.5.0–0.15.2 =
 * POS support (customer search, receipts, email/Klaviyo suppression), HCSA
   order-fatal guard, single/bulk customer provisioning, Points add/deduct/
