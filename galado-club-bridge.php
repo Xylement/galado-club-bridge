@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.27.1
+ * Version: 0.27.2
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.27.1';
+    const VERSION  = '0.27.2';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -1120,6 +1120,116 @@ final class Galado_Club_Bridge {
                     }
                 }
                 return ['fields' => $fields];
+            },
+        ]);
+
+        // iOS app: create a PENDING order carrying customisation line meta
+        // (same {label: value} format the POS writes), returning the hosted
+        // payment URL. Member pays via checkout/order-pay → normal gateway +
+        // email + stock machinery takes over. pos_guard_hcsa (priority 1 on
+        // woocommerce_new_order) already covers this programmatic creation.
+        register_rest_route('galado-club/v1', '/app-order', [
+            'methods'             => 'POST',
+            'permission_callback' => [__CLASS__, 'bridge_auth'],
+            'callback'            => function (WP_REST_Request $request) {
+                $p       = $request->get_json_params();
+                $lines   = is_array($p['lines'] ?? null) ? $p['lines'] : [];
+                $billing = is_array($p['billing'] ?? null) ? $p['billing'] : [];
+                $email   = sanitize_email((string) ($billing['email'] ?? ''));
+                if (!count($lines) || !$email) {
+                    return new WP_Error('bad_request', 'lines and billing.email required', ['status' => 400]);
+                }
+                $order = wc_create_order(['status' => 'pending']);
+                if (is_wp_error($order)) {
+                    return $order;
+                }
+                foreach ($lines as $l) {
+                    $pid = absint($l['product_id'] ?? 0);
+                    $vid = absint($l['variation_id'] ?? 0);
+                    $qty = max(1, absint($l['quantity'] ?? 1));
+                    $product = wc_get_product($vid ?: $pid);
+                    if (!$product || !$product->is_purchasable()) {
+                        $order->delete(true);
+                        return new WP_Error('bad_request', 'unknown or unpurchasable product ' . ($vid ?: $pid), ['status' => 400]);
+                    }
+                    $item_id = $order->add_product($product, $qty);
+                    if ($item_id && is_array($l['custom'] ?? null)) {
+                        $item = $order->get_item($item_id);
+                        foreach ($l['custom'] as $c) {
+                            $k = sanitize_text_field((string) ($c['label'] ?? ''));
+                            $v = sanitize_textarea_field((string) ($c['value'] ?? ''));
+                            if ($k !== '' && $v !== '') {
+                                $item->add_meta_data(mb_substr($k, 0, 80), mb_substr($v, 0, 500), false);
+                            }
+                        }
+                        $item->save();
+                    }
+                }
+                $addon = (float) ($p['addon_total'] ?? 0);
+                if ($addon > 0 && $addon < 10000) {
+                    $fee = new WC_Order_Item_Fee();
+                    $fee->set_name('Customisation add-ons');
+                    $fee->set_amount((string) $addon);
+                    $fee->set_total((string) $addon);
+                    $order->add_item($fee);
+                }
+                $user = get_user_by('email', $email);
+                // Coupon (tier codes etc.) — validated by Woo itself.
+                $coupon = strtoupper(sanitize_text_field((string) ($p['coupon'] ?? '')));
+                if ($coupon !== '') {
+                    $applied = $order->apply_coupon($coupon);
+                    if (is_wp_error($applied)) {
+                        $order->delete(true);
+                        return new WP_Error('bad_coupon', $applied->get_error_message(), ['status' => 400]);
+                    }
+                }
+                // Shopping Credits redemption — same deduction the POS uses
+                // (10 points = RM1), surfaced as a negative fee line.
+                $credits_points = absint($p['credits_points'] ?? 0);
+                if ($credits_points > 0) {
+                    if (!class_exists('WC_Points_Rewards_Manager') || !$user) {
+                        $order->delete(true);
+                        return new WP_Error('bad_request', 'credits unavailable for this account', ['status' => 400]);
+                    }
+                    $balance = (int) WC_Points_Rewards_Manager::get_users_points($user->ID);
+                    if ($credits_points > $balance) {
+                        $order->delete(true);
+                        return new WP_Error('insufficient_points', 'not enough Shopping Credits', ['status' => 409]);
+                    }
+                    $credits_rm = round($credits_points / 10, 2);
+                    WC_Points_Rewards_Manager::decrease_points($user->ID, $credits_points, 'galado-app-redemption');
+                    $credit_fee = new WC_Order_Item_Fee();
+                    $credit_fee->set_name('Shopping Credits redeemed');
+                    $credit_fee->set_amount((string) (-$credits_rm));
+                    $credit_fee->set_total((string) (-$credits_rm));
+                    $order->add_item($credit_fee);
+                    $order->add_meta_data('_galado_app_credits_points', (string) $credits_points);
+                }
+                $addr = [
+                    'first_name' => sanitize_text_field((string) ($billing['first_name'] ?? '')),
+                    'last_name'  => sanitize_text_field((string) ($billing['last_name'] ?? '')),
+                    'address_1'  => sanitize_text_field((string) ($billing['address_1'] ?? '')),
+                    'address_2'  => sanitize_text_field((string) ($billing['address_2'] ?? '')),
+                    'city'       => sanitize_text_field((string) ($billing['city'] ?? '')),
+                    'state'      => sanitize_text_field((string) ($billing['state'] ?? '')),
+                    'postcode'   => sanitize_text_field((string) ($billing['postcode'] ?? '')),
+                    'country'    => sanitize_text_field((string) ($billing['country'] ?? 'MY')),
+                    'email'      => $email,
+                    'phone'      => sanitize_text_field((string) ($billing['phone'] ?? '')),
+                ];
+                $order->set_address($addr, 'billing');
+                $order->set_address($addr, 'shipping');
+                if ($user) {
+                    $order->set_customer_id($user->ID);
+                }
+                $order->add_meta_data('_galado_app_order', '1');
+                $order->calculate_totals();
+                $order->save();
+                return [
+                    'order_id'  => $order->get_id(),
+                    'order_key' => $order->get_order_key(),
+                    'pay_url'   => $order->get_checkout_payment_url(),
+                ];
             },
         ]);
 
