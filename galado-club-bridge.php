@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.26.0
+ * Version: 0.26.1
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.26.0';
+    const VERSION  = '0.26.1';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -1128,6 +1128,16 @@ final class Galado_Club_Bridge {
                                 'price' => (string) ($v['price'] ?? ''),
                             ];
                         }
+                        // WCPA conditional logic (field shows only when another
+                        // field holds a given value) — passed through raw so the
+                        // iOS app can nest dependent fields (strap colour under
+                        // the strap option). Carrier key names vary by version.
+                        $logic = [];
+                        foreach (['logic', 'cl_rule', 'clRules', 'conditions', 'condition', 'enableCl', 'relCl'] as $lk) {
+                            if (isset($f[$lk])) {
+                                $logic[$lk] = $f[$lk];
+                            }
+                        }
                         $fields[] = [
                             'form_id'     => (int) $fid,
                             'type'        => $type,
@@ -1138,6 +1148,8 @@ final class Galado_Club_Bridge {
                             'maxlength'   => (int) ($f['maxlength'] ?? 0),
                             'required'    => !empty($f['required']),
                             'options'     => $options,
+                            'logic'       => $logic ?: null,
+                            'field_keys'  => array_keys($f),
                         ];
                     }
                 }
