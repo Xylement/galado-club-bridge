@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.26.2
+ * Version: 0.27.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.26.2';
+    const VERSION  = '0.27.0';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -86,9 +86,6 @@ final class Galado_Club_Bridge {
         add_filter('woocommerce_email_subject_customer_completed_order', [__CLASS__, 'pos_email_subject'], 10, 2);
         add_filter('woocommerce_email_heading_customer_completed_order', [__CLASS__, 'pos_email_heading'], 10, 2);
         add_action('woocommerce_email_before_order_table', [__CLASS__, 'pos_email_intro'], 10, 4);
-        // Background worker for the POS receipt email, queued by /order-email so the POS
-        // never waits on SMTP (must be registered on every request for Action Scheduler).
-        add_action('galado_pos_order_email_job', [__CLASS__, 'pos_order_email_job'], 10, 1);
         // The "Hide Checkout Shipping Address" plugin fatals on any programmatic order
         // creation (its woocommerce_new_order handler reads WC_Checkout->shipping_method,
         // which calls WC()->session->get() — null outside a real browser checkout). Detach
@@ -142,32 +139,13 @@ final class Galado_Club_Bridge {
         if (!$order->get_billing_email()) {
             return new WP_Error('no_email', 'order has no email — provide one', ['status' => 400]);
         }
-        // Queue the render + SMTP send (Action Scheduler ships with WooCommerce) so the
-        // POS gets its answer in milliseconds instead of waiting out the mail server (a
-        // slow SMTP day held the Send button for 11s). The recipient is already saved on
-        // the order, so the job only needs the id. Inline send stays as the fallback.
-        if (function_exists('as_enqueue_async_action')) {
-            as_enqueue_async_action('galado_pos_order_email_job', [$order->get_id()], 'galado-pos');
-            return ['ok' => true, 'sent_to' => $order->get_billing_email(), 'queued' => true];
-        }
-        self::pos_order_email_job($order->get_id());
-        return ['ok' => true, 'sent_to' => $order->get_billing_email(), 'queued' => false];
-    }
-
-    /** Action Scheduler worker: the actual receipt render + send, off the POS request path. */
-    public static function pos_order_email_job($order_id) {
-        $order = wc_get_order(absint($order_id));
-        if (!$order || !$order->get_billing_email()) {
-            return;
-        }
-        // This runs in its own request, so the suppression override must be re-asserted
-        // here: without it pos_suppress_email would block this send for a POS order.
         self::$pos_email_override = true;
         $emails = WC()->mailer()->get_emails();
         if (isset($emails['WC_Email_Customer_Completed_Order'])) {
-            $emails['WC_Email_Customer_Completed_Order']->trigger($order->get_id());
+            $emails['WC_Email_Customer_Completed_Order']->trigger($order_id);
         }
         self::$pos_email_override = false;
+        return ['ok' => true, 'sent_to' => $order->get_billing_email()];
     }
 
     public static function pos_email_subject($subject, $order = null) {
@@ -1128,16 +1106,6 @@ final class Galado_Club_Bridge {
                                 'price' => (string) ($v['price'] ?? ''),
                             ];
                         }
-                        // WCPA conditional logic (field shows only when another
-                        // field holds a given value) — passed through raw so the
-                        // iOS app can nest dependent fields (strap colour under
-                        // the strap option). Carrier key names vary by version.
-                        $logic = [];
-                        foreach (['logic', 'cl_rule', 'cl_val', 'cl_fields', 'relations', 'clRules', 'conditions', 'condition', 'enableCl', 'relCl'] as $lk) {
-                            if (isset($f[$lk])) {
-                                $logic[$lk] = $f[$lk];
-                            }
-                        }
                         $fields[] = [
                             'form_id'     => (int) $fid,
                             'type'        => $type,
@@ -1148,91 +1116,10 @@ final class Galado_Club_Bridge {
                             'maxlength'   => (int) ($f['maxlength'] ?? 0),
                             'required'    => !empty($f['required']),
                             'options'     => $options,
-                            'logic'       => $logic ?: null,
-                            'field_keys'  => array_keys($f),
                         ];
                     }
                 }
                 return ['fields' => $fields];
-            },
-        ]);
-
-        // iOS app: create a PENDING order carrying customisation line meta
-        // (same {label: value} format the POS writes), returning the hosted
-        // payment URL. Member pays via checkout/order-pay → normal gateway +
-        // email + stock machinery takes over. pos_guard_hcsa (priority 1 on
-        // woocommerce_new_order) already covers this programmatic creation.
-        register_rest_route('galado-club/v1', '/app-order', [
-            'methods'             => 'POST',
-            'permission_callback' => [__CLASS__, 'bridge_auth'],
-            'callback'            => function (WP_REST_Request $request) {
-                $p       = $request->get_json_params();
-                $lines   = is_array($p['lines'] ?? null) ? $p['lines'] : [];
-                $billing = is_array($p['billing'] ?? null) ? $p['billing'] : [];
-                $email   = sanitize_email((string) ($billing['email'] ?? ''));
-                if (!count($lines) || !$email) {
-                    return new WP_Error('bad_request', 'lines and billing.email required', ['status' => 400]);
-                }
-                $order = wc_create_order(['status' => 'pending']);
-                if (is_wp_error($order)) {
-                    return $order;
-                }
-                foreach ($lines as $l) {
-                    $pid = absint($l['product_id'] ?? 0);
-                    $vid = absint($l['variation_id'] ?? 0);
-                    $qty = max(1, absint($l['quantity'] ?? 1));
-                    $product = wc_get_product($vid ?: $pid);
-                    if (!$product || !$product->is_purchasable()) {
-                        $order->delete(true);
-                        return new WP_Error('bad_request', 'unknown or unpurchasable product ' . ($vid ?: $pid), ['status' => 400]);
-                    }
-                    $item_id = $order->add_product($product, $qty);
-                    if ($item_id && is_array($l['custom'] ?? null)) {
-                        $item = $order->get_item($item_id);
-                        foreach ($l['custom'] as $c) {
-                            $k = sanitize_text_field((string) ($c['label'] ?? ''));
-                            $v = sanitize_textarea_field((string) ($c['value'] ?? ''));
-                            if ($k !== '' && $v !== '') {
-                                $item->add_meta_data(mb_substr($k, 0, 80), mb_substr($v, 0, 500), false);
-                            }
-                        }
-                        $item->save();
-                    }
-                }
-                $addon = (float) ($p['addon_total'] ?? 0);
-                if ($addon > 0 && $addon < 10000) {
-                    $fee = new WC_Order_Item_Fee();
-                    $fee->set_name('Customisation add-ons');
-                    $fee->set_amount((string) $addon);
-                    $fee->set_total((string) $addon);
-                    $order->add_item($fee);
-                }
-                $addr = [
-                    'first_name' => sanitize_text_field((string) ($billing['first_name'] ?? '')),
-                    'last_name'  => sanitize_text_field((string) ($billing['last_name'] ?? '')),
-                    'address_1'  => sanitize_text_field((string) ($billing['address_1'] ?? '')),
-                    'address_2'  => sanitize_text_field((string) ($billing['address_2'] ?? '')),
-                    'city'       => sanitize_text_field((string) ($billing['city'] ?? '')),
-                    'state'      => sanitize_text_field((string) ($billing['state'] ?? '')),
-                    'postcode'   => sanitize_text_field((string) ($billing['postcode'] ?? '')),
-                    'country'    => sanitize_text_field((string) ($billing['country'] ?? 'MY')),
-                    'email'      => $email,
-                    'phone'      => sanitize_text_field((string) ($billing['phone'] ?? '')),
-                ];
-                $order->set_address($addr, 'billing');
-                $order->set_address($addr, 'shipping');
-                $user = get_user_by('email', $email);
-                if ($user) {
-                    $order->set_customer_id($user->ID);
-                }
-                $order->add_meta_data('_galado_app_order', '1');
-                $order->calculate_totals();
-                $order->save();
-                return [
-                    'order_id'  => $order->get_id(),
-                    'order_key' => $order->get_order_key(),
-                    'pay_url'   => $order->get_checkout_payment_url(),
-                ];
             },
         ]);
 
@@ -1403,6 +1290,13 @@ final class Galado_Club_Bridge {
             return new WP_Error('bad_request', 'Please enter a valid email.', ['status' => 400]);
         }
         $ip  = isset($_SERVER['REMOTE_ADDR']) ? (string) $_SERVER['REMOTE_ADDR'] : 'unknown';
+        // Referral carry-through: the visitor's own galado_ref cookie (set when they opened a
+        // store share link). Forwarded so the Club can park it server-side and the referral
+        // survives even when the magic link opens in a different browser.
+        $ref = '';
+        if (!empty($_COOKIE['galado_ref'])) {
+            $ref = strtoupper(substr(preg_replace('/[^A-Za-z0-9]/', '', (string) wp_unslash($_COOKIE['galado_ref'])), 0, 12));
+        }
         $key = 'gld_pj_' . md5($ip);
         $n   = (int) get_transient($key);
         if ($n >= 6) {
@@ -1412,7 +1306,10 @@ final class Galado_Club_Bridge {
         $res = wp_remote_post(GALADO_CLUB_URL . '/api/claim/request', [
             'timeout' => 8,
             'headers' => ['content-type' => 'application/json', 'x-club-bridge-secret' => GALADO_CLUB_BRIDGE_SECRET],
-            'body'    => wp_json_encode(['email' => $email, 'name' => mb_substr($name, 0, 60), 'clientIp' => $ip, 'source' => 'popup']),
+            'body'    => wp_json_encode(array_merge(
+                ['email' => $email, 'name' => mb_substr($name, 0, 60), 'clientIp' => $ip, 'source' => 'popup'],
+                $ref ? ['ref' => $ref] : []
+            )),
         ]);
         if (is_wp_error($res)) {
             return new WP_Error('unreachable', 'The Club is catching its breath. Please try again shortly.', ['status' => 503]);
