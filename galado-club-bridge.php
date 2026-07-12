@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.30.3
+ * Version: 0.30.4
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.30.3';
+    const VERSION  = '0.30.4';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -56,7 +56,7 @@ final class Galado_Club_Bridge {
         // (the app sends card shoppers here with stripe_cc chosen, but the
         // template otherwise checks the first gateway = molpay). Moving the
         // order's own gateway to the front makes it the pre-selected one.
-        add_filter('woocommerce_available_payment_gateways', [__CLASS__, 'preselect_order_pay_gateway'], 20);
+        add_filter('woocommerce_available_payment_gateways', [__CLASS__, 'preselect_order_pay_gateway'], 9999);
         // Every order earns Shopping Credits on the FINAL amount paid (product +
         // customisation add-ons, less discounts/redemptions), not WooCommerce's
         // default per-product sum which ignores add-on FEES and under-credits any
