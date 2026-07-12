@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.28.1
+ * Version: 0.29.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.28.1';
+    const VERSION  = '0.29.0';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -52,6 +52,10 @@ final class Galado_Club_Bridge {
         // delivery address on order emails; buyers should see where their
         // parcel is going.
         add_filter('woocommerce_order_needs_shipping_address', [__CLASS__, 'app_order_needs_shipping_address'], 10, 3);
+        // App orders earn Shopping Credits on the FINAL amount paid (product +
+        // customisation add-ons), not WooCommerce's per-product sum which ignores
+        // the add-on fee and under-credits app checkouts.
+        add_filter('wc_points_rewards_points_earned_for_purchase', [__CLASS__, 'app_order_points_earned'], 20, 2);
         add_action('rest_api_init', [__CLASS__, 'rest_routes']);
         // Two-way account link: a new galado.com.my registration also creates the Club member.
         add_action('user_register', [__CLASS__, 'on_user_register'], 20, 1);
@@ -1364,6 +1368,39 @@ final class Galado_Club_Bridge {
             return true;
         }
         return $needs;
+    }
+
+    /** App orders (native iOS app, created via /app-order) earn Shopping Credits
+     *  on the FINAL amount the customer paid — product + customisation add-ons,
+     *  less any Shopping Credits redeemed — per the store's earn ratio. Woo's
+     *  default sums per-product points and ignores the add-on FEE, which
+     *  under-credits app orders (e.g. an RM149 product + RM35 add-on earned 29
+     *  instead of 92). This mirrors the on-site "RM2 = 1 point" promise on the
+     *  amount actually charged. Applies only to _galado_app_order orders; every
+     *  other order keeps WooCommerce's own per-product calculation. */
+    public static function app_order_points_earned($points, $order) {
+        $order = ($order instanceof WC_Order) ? $order : wc_get_order($order);
+        if (!$order || !$order->get_meta('_galado_app_order')) {
+            return $points;
+        }
+        $ratio = explode(':', (string) get_option('wc_points_rewards_earn_points_ratio', '1:1'));
+        $earn  = isset($ratio[0]) ? (float) $ratio[0] : 0.0;
+        $per   = isset($ratio[1]) ? (float) $ratio[1] : 0.0;
+        if ($earn <= 0 || $per <= 0) {
+            return $points; // misconfigured ratio: leave WooCommerce's value untouched
+        }
+        // get_total() already nets the "Shopping Credits redeemed" negative fee,
+        // so a credit-funded portion never re-earns points.
+        $base = (float) $order->get_total();
+        if ($base <= 0) {
+            return 0;
+        }
+        $raw = $base * ($earn / $per);
+        switch (get_option('wc_points_rewards_earn_points_rounding', 'round')) {
+            case 'ceil':  return (int) ceil($raw);
+            case 'floor': return (int) floor($raw);
+            default:      return (int) round($raw);
+        }
     }
 
     /** Payment URL for an app-created order. Members get a single-use
