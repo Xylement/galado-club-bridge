@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.30.2
+ * Version: 0.30.3
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.30.2';
+    const VERSION  = '0.30.3';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -1385,11 +1385,11 @@ final class Galado_Club_Bridge {
         if (is_admin() || !is_array($gateways) || count($gateways) < 2) {
             return $gateways;
         }
-        if (!function_exists('is_wc_endpoint_url') || !is_wc_endpoint_url('order-pay')) {
-            return $gateways;
+        // On the order-pay page the order id lives in the `order-pay` query var.
+        $order_id = absint(get_query_var('order-pay'));
+        if (!$order_id && isset($GLOBALS['wp']->query_vars['order-pay'])) {
+            $order_id = absint($GLOBALS['wp']->query_vars['order-pay']);
         }
-        global $wp;
-        $order_id = isset($wp->query_vars['order-pay']) ? absint($wp->query_vars['order-pay']) : 0;
         if (!$order_id) {
             return $gateways;
         }
