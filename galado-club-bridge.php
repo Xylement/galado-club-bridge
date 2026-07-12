@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.27.3
+ * Version: 0.28.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.27.3';
+    const VERSION  = '0.28.0';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -1240,8 +1240,55 @@ final class Galado_Club_Bridge {
                 return [
                     'order_id'  => $order->get_id(),
                     'order_key' => $order->get_order_key(),
-                    'pay_url'   => $order->get_checkout_payment_url(),
+                    'pay_url'   => self::app_pay_url($order, $user),
                 ];
+            },
+        ]);
+
+        // App -> fresh payment link for an existing order (Resume Payment).
+        // The club server calls this with the signed-in member's email; the
+        // billing-email match is the ownership check.
+        register_rest_route('galado-club/v1', '/app-pay-link', [
+            'methods'             => 'POST',
+            'permission_callback' => [__CLASS__, 'bridge_auth'],
+            'callback'            => function (WP_REST_Request $request) {
+                $p     = $request->get_json_params();
+                $order = wc_get_order(absint($p['order_id'] ?? 0));
+                $email = sanitize_email((string) ($p['email'] ?? ''));
+                if (!$order || !$email || 0 !== strcasecmp($order->get_billing_email(), $email)) {
+                    return new WP_Error('not_found', 'order not found', ['status' => 404]);
+                }
+                if (!$order->needs_payment()) {
+                    return ['paid' => true, 'status' => $order->get_status()];
+                }
+                return [
+                    'order_id'  => $order->get_id(),
+                    'order_key' => $order->get_order_key(),
+                    'pay_url'   => self::app_pay_url($order, get_user_by('email', $email)),
+                ];
+            },
+        ]);
+
+        // Browser-facing half of the app payment hand-off: a single-use token
+        // signs the member's own WP session in, then lands on order-pay, so
+        // the app's payment sheet never shows a login form. Tokens are minted
+        // only by bridge-authenticated calls above (10 min TTL).
+        register_rest_route('galado-club/v1', '/app-pay/(?P<token>[A-Za-z0-9]{20,64})', [
+            'methods'             => 'GET',
+            'permission_callback' => '__return_true',
+            'callback'            => function (WP_REST_Request $request) {
+                $token = (string) $request['token'];
+                $data  = get_transient('gld_app_pay_' . $token);
+                delete_transient('gld_app_pay_' . $token); // single use, even when invalid
+                $order = is_array($data) ? wc_get_order(absint($data['order'] ?? 0)) : false;
+                $user  = is_array($data) ? get_user_by('id', absint($data['uid'] ?? 0)) : false;
+                if (!$order || !$user) {
+                    wp_safe_redirect(home_url('/')); // expired link: plain storefront, no hints
+                    exit;
+                }
+                wp_set_auth_cookie($user->ID, false);
+                wp_safe_redirect($order->get_checkout_payment_url());
+                exit;
             },
         ]);
 
@@ -1304,6 +1351,22 @@ final class Galado_Club_Bridge {
                 return ['customers' => $out];
             },
         ]);
+    }
+
+    /** Payment URL for an app-created order. Members get a single-use
+     *  auto-login token URL (order-pay refuses guests once an order belongs
+     *  to an account); orders without a WP user fall back to the plain
+     *  key-guarded order-pay URL, which guests can open directly. */
+    private static function app_pay_url($order, $user) {
+        if (!$user) {
+            return $order->get_checkout_payment_url();
+        }
+        $token = wp_generate_password(48, false, false);
+        set_transient('gld_app_pay_' . $token, [
+            'uid'   => (int) $user->ID,
+            'order' => (int) $order->get_id(),
+        ], 10 * MINUTE_IN_SECONDS);
+        return rest_url('galado-club/v1/app-pay/' . $token);
     }
 
     /* ── Mid-Year Member Sale helpers (see MYS_* constants for the what/why) ─────────
