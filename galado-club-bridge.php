@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.30.5
+ * Version: 0.30.6
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.30.5';
+    const VERSION  = '0.30.6';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -52,13 +52,12 @@ final class Galado_Club_Bridge {
         // delivery address on order emails; buyers should see where their
         // parcel is going.
         add_filter('woocommerce_order_needs_shipping_address', [__CLASS__, 'app_order_needs_shipping_address'], 10, 3);
-        // Order-pay page: pre-select the gateway the order was CREATED with
-        // (the app sends card shoppers here with stripe_cc chosen, but the
-        // template otherwise checks the first gateway = molpay). Moving the
-        // order's own gateway to the front makes it the pre-selected one.
-        add_filter('woocommerce_available_payment_gateways', [__CLASS__, 'preselect_order_pay_gateway'], 9999);
-        add_action('woocommerce_pay_order_before_submit', [__CLASS__, 'gld_pre_debug_echo']);
-        add_action('wp_footer', [__CLASS__, 'gld_pre_debug_echo']);
+        // Order-pay page: pre-select the gateway the order was CREATED with.
+        // The app sends card shoppers here with the order set to stripe_cc, but
+        // the page otherwise defaults to the first gateway (molpay), so they'd
+        // have to re-pick Credit Card. The store's order-pay page has no
+        // script-src CSP, so a tiny inline script checks the right radio.
+        add_action('woocommerce_pay_order_before_submit', [__CLASS__, 'preselect_order_pay_gateway_script']);
         // Every order earns Shopping Credits on the FINAL amount paid (product +
         // customisation add-ons, less discounts/redemptions), not WooCommerce's
         // default per-product sum which ignores add-on FEES and under-credits any
@@ -1378,45 +1377,43 @@ final class Galado_Club_Bridge {
         return $needs;
     }
 
-    /** On the order-pay page, move the order's OWN payment method to the front
-     *  of the available gateways so WooCommerce (which pre-selects the first
-     *  one) checks it by default. The app opens card shoppers here with the
-     *  order already set to stripe_cc; without this they land on molpay and
-     *  have to re-pick Credit Card. Only reorders — never adds/removes. */
-    public static function preselect_order_pay_gateway($gateways) {
-        if (is_admin() || !is_array($gateways) || count($gateways) < 2) {
-            return $gateways;
-        }
-        // On the order-pay page the order id lives in the `order-pay` query var.
+    /** On the order-pay page, tick the radio for the gateway the order was
+     *  created with (WooCommerce/MOLPay otherwise default to the first one).
+     *  The app sets card orders to stripe_cc, so the shopper lands with Credit
+     *  Card already selected. No-op when the order has no chosen gateway (the
+     *  customised flow, where the shopper picks on the page). */
+    public static function preselect_order_pay_gateway_script() {
         $order_id = absint(get_query_var('order-pay'));
         if (!$order_id && isset($GLOBALS['wp']->query_vars['order-pay'])) {
             $order_id = absint($GLOBALS['wp']->query_vars['order-pay']);
         }
         if (!$order_id) {
-            return $gateways;
+            return;
         }
         $order = wc_get_order($order_id);
         if (!$order) {
-            return $gateways;
+            return;
         }
         $pm = $order->get_payment_method();
-        $GLOBALS['gld_pre_debug'] = 'oid=' . $order_id . ' pm=' . $pm . ' first=' . array_key_first($gateways) . ' keys=' . implode(',', array_keys($gateways));
-        if ($pm && isset($gateways[$pm]) && array_key_first($gateways) !== $pm) {
-            $reordered = [$pm => $gateways[$pm]];
-            foreach ($gateways as $id => $gateway) {
-                if ($id !== $pm) {
-                    $reordered[$id] = $gateway;
-                }
-            }
-            $GLOBALS['gld_pre_debug'] .= ' REORDERED->' . array_key_first($reordered);
-            return $reordered;
+        if (!$pm) {
+            return;
         }
-        $GLOBALS['gld_pre_debug'] .= ' NOREORDER';
-        return $gateways;
-    }
-
-    public static function gld_pre_debug_echo() {
-        echo "\n<!-- GLDPRE " . esc_html($GLOBALS['gld_pre_debug'] ?? 'filter-never-ran') . " -->\n";
+        $target = 'payment_method_' . preg_replace('/[^a-z0-9_]/', '', $pm);
+        ?>
+<script>
+(function(){
+  function pick(){
+    var el = document.getElementById(<?php echo wp_json_encode($target); ?>);
+    if (!el || el.checked) { return; }
+    el.checked = true;
+    if (window.jQuery) { jQuery(el).trigger('click').trigger('change'); }
+    else { el.click(); el.dispatchEvent(new Event('change', { bubbles: true })); }
+  }
+  if (document.readyState !== 'loading') { pick(); }
+  else { document.addEventListener('DOMContentLoaded', pick); }
+})();
+</script>
+        <?php
     }
 
     /** Every order earns Shopping Credits on the FINAL amount the customer paid —
