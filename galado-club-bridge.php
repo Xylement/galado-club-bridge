@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.28.0
+ * Version: 0.28.1
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.28.0';
+    const VERSION  = '0.28.1';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -48,6 +48,10 @@ final class Galado_Club_Bridge {
         add_action('woocommerce_thankyou', [__CLASS__, 'thankyou_block']);
         // Order-confirmation email "Add to Wallet" block (customer emails only; dark until launch).
         add_action('woocommerce_email_after_order_table', [__CLASS__, 'wallet_add_email_block'], 25, 4);
+        // App orders carry no shipping-method line, so WooCommerce hides the
+        // delivery address on order emails; buyers should see where their
+        // parcel is going.
+        add_filter('woocommerce_order_needs_shipping_address', [__CLASS__, 'app_order_needs_shipping_address'], 10, 3);
         add_action('rest_api_init', [__CLASS__, 'rest_routes']);
         // Two-way account link: a new galado.com.my registration also creates the Club member.
         add_action('user_register', [__CLASS__, 'on_user_register'], 20, 1);
@@ -1351,6 +1355,15 @@ final class Galado_Club_Bridge {
                 return ['customers' => $out];
             },
         ]);
+    }
+
+    /** Emails hide the shipping block when an order has no shipping-method
+     *  line (app orders never do). Force it on for them: the address is set. */
+    public static function app_order_needs_shipping_address($needs, $hide, $order) {
+        if (!$needs && $order instanceof WC_Order && $order->get_meta('_galado_app_order')) {
+            return true;
+        }
+        return $needs;
     }
 
     /** Payment URL for an app-created order. Members get a single-use
