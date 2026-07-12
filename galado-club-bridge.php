@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.30.0
+ * Version: 0.30.1
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.30.0';
+    const VERSION  = '0.30.1';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -55,7 +55,7 @@ final class Galado_Club_Bridge {
         // Every order earns Shopping Credits on the FINAL amount paid (product +
         // customisation add-ons, less discounts/redemptions), not WooCommerce's
         // default per-product sum which ignores add-on FEES and under-credits any
-        // order with add-ons. Product/category multipliers (DOUBLE Reward) kept.
+        // order with add-ons.
         add_filter('wc_points_rewards_points_earned_for_purchase', [__CLASS__, 'points_earned_on_paid_amount'], 20, 2);
         add_action('rest_api_init', [__CLASS__, 'rest_routes']);
         // Two-way account link: a new galado.com.my registration also creates the Club member.
@@ -1373,16 +1373,16 @@ final class Galado_Club_Bridge {
 
     /** Every order earns Shopping Credits on the FINAL amount the customer paid —
      *  product + customisation add-ons, less any discount or Shopping Credits
-     *  redeemed (get_total() nets both). WooCommerce's default sums per-product
-     *  points and ignores add-on FEES, under-crediting any order with add-ons
-     *  (e.g. an RM149 product + RM35 add-on earned 75 instead of 92; all-add-on
-     *  products earned 0). Mirrors the on-site "RM2 = 1 point" promise on the
-     *  amount actually charged.
+     *  redeemed. get_total() already nets all of these (add-ons are positive fee
+     *  lines, redemptions/discounts negative), so it is exactly "what they paid".
+     *  WooCommerce's default instead sums per-product points and ignores add-on
+     *  FEES, under-crediting any order with add-ons (e.g. RM149 product + RM35
+     *  add-on earned 75 instead of 92; an all-add-on product earned 0). This
+     *  mirrors the on-site "RM2 = 1 point" promise on the amount actually charged.
      *
-     *  Product/category point multipliers are preserved: when Woo's own boosted
-     *  per-product figure (e.g. the DOUBLE Reward category, 200%) beats the base
-     *  rate, keep it and add the add-on fees Woo ignored, rather than flattening
-     *  it to the final-amount rule. */
+     *  Note: this replaces Woo's per-product figure, so a per-product or category
+     *  points multiplier would not apply. There are none today (the DOUBLE Reward
+     *  category is empty); revisit here if such a promo is ever introduced. */
     public static function points_earned_on_paid_amount($points, $order) {
         $order = ($order instanceof WC_Order) ? $order : wc_get_order($order);
         if (!$order) {
@@ -1394,25 +1394,15 @@ final class Galado_Club_Bridge {
         if ($earn <= 0 || $per <= 0) {
             return $points; // misconfigured ratio: leave WooCommerce's value untouched
         }
-        $rate  = $earn / $per;
-        $round = get_option('wc_points_rewards_earn_points_rounding', 'round');
-        $apply = function ($n) use ($round) {
-            return (int) ('ceil' === $round ? ceil($n) : ('floor' === $round ? floor($n) : round($n)));
-        };
-        // Boost in play (multiplier/override lifted Woo's per-product figure above
-        // the plain product rate): preserve it, then add the add-on fees on top.
-        if ((int) $points > $apply((float) $order->get_subtotal() * $rate)) {
-            $fees = 0.0;
-            foreach ($order->get_items('fee') as $fee) {
-                $amt = (float) $fee->get_total(); // add-ons are positive; redemptions negative
-                if ($amt > 0) {
-                    $fees += $amt;
-                }
-            }
-            return (int) $points + $apply($fees * $rate);
+        $base = (float) $order->get_total() * ($earn / $per);
+        if ($base <= 0) {
+            return 0;
         }
-        // Standard case: earn on the final amount charged (incl. add-ons).
-        return $apply((float) $order->get_total() * $rate);
+        switch (get_option('wc_points_rewards_earn_points_rounding', 'round')) {
+            case 'ceil':  return (int) ceil($base);
+            case 'floor': return (int) floor($base);
+            default:      return (int) round($base);
+        }
     }
 
     /** Payment URL for an app-created order. Members get a single-use
