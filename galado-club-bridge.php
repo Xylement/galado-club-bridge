@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.30.4
+ * Version: 0.30.5
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.30.4';
+    const VERSION  = '0.30.5';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -57,6 +57,8 @@ final class Galado_Club_Bridge {
         // template otherwise checks the first gateway = molpay). Moving the
         // order's own gateway to the front makes it the pre-selected one.
         add_filter('woocommerce_available_payment_gateways', [__CLASS__, 'preselect_order_pay_gateway'], 9999);
+        add_action('woocommerce_pay_order_before_submit', [__CLASS__, 'gld_pre_debug_echo']);
+        add_action('wp_footer', [__CLASS__, 'gld_pre_debug_echo']);
         // Every order earns Shopping Credits on the FINAL amount paid (product +
         // customisation add-ons, less discounts/redemptions), not WooCommerce's
         // default per-product sum which ignores add-on FEES and under-credits any
@@ -1398,6 +1400,7 @@ final class Galado_Club_Bridge {
             return $gateways;
         }
         $pm = $order->get_payment_method();
+        $GLOBALS['gld_pre_debug'] = 'oid=' . $order_id . ' pm=' . $pm . ' first=' . array_key_first($gateways) . ' keys=' . implode(',', array_keys($gateways));
         if ($pm && isset($gateways[$pm]) && array_key_first($gateways) !== $pm) {
             $reordered = [$pm => $gateways[$pm]];
             foreach ($gateways as $id => $gateway) {
@@ -1405,9 +1408,15 @@ final class Galado_Club_Bridge {
                     $reordered[$id] = $gateway;
                 }
             }
+            $GLOBALS['gld_pre_debug'] .= ' REORDERED->' . array_key_first($reordered);
             return $reordered;
         }
+        $GLOBALS['gld_pre_debug'] .= ' NOREORDER';
         return $gateways;
+    }
+
+    public static function gld_pre_debug_echo() {
+        echo "\n<!-- GLDPRE " . esc_html($GLOBALS['gld_pre_debug'] ?? 'filter-never-ran') . " -->\n";
     }
 
     /** Every order earns Shopping Credits on the FINAL amount the customer paid —
