@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.30.1
+ * Version: 0.30.2
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.30.1';
+    const VERSION  = '0.30.2';
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -52,6 +52,11 @@ final class Galado_Club_Bridge {
         // delivery address on order emails; buyers should see where their
         // parcel is going.
         add_filter('woocommerce_order_needs_shipping_address', [__CLASS__, 'app_order_needs_shipping_address'], 10, 3);
+        // Order-pay page: pre-select the gateway the order was CREATED with
+        // (the app sends card shoppers here with stripe_cc chosen, but the
+        // template otherwise checks the first gateway = molpay). Moving the
+        // order's own gateway to the front makes it the pre-selected one.
+        add_filter('woocommerce_available_payment_gateways', [__CLASS__, 'preselect_order_pay_gateway'], 20);
         // Every order earns Shopping Credits on the FINAL amount paid (product +
         // customisation add-ons, less discounts/redemptions), not WooCommerce's
         // default per-product sum which ignores add-on FEES and under-credits any
@@ -1369,6 +1374,40 @@ final class Galado_Club_Bridge {
             return true;
         }
         return $needs;
+    }
+
+    /** On the order-pay page, move the order's OWN payment method to the front
+     *  of the available gateways so WooCommerce (which pre-selects the first
+     *  one) checks it by default. The app opens card shoppers here with the
+     *  order already set to stripe_cc; without this they land on molpay and
+     *  have to re-pick Credit Card. Only reorders — never adds/removes. */
+    public static function preselect_order_pay_gateway($gateways) {
+        if (is_admin() || !is_array($gateways) || count($gateways) < 2) {
+            return $gateways;
+        }
+        if (!function_exists('is_wc_endpoint_url') || !is_wc_endpoint_url('order-pay')) {
+            return $gateways;
+        }
+        global $wp;
+        $order_id = isset($wp->query_vars['order-pay']) ? absint($wp->query_vars['order-pay']) : 0;
+        if (!$order_id) {
+            return $gateways;
+        }
+        $order = wc_get_order($order_id);
+        if (!$order) {
+            return $gateways;
+        }
+        $pm = $order->get_payment_method();
+        if ($pm && isset($gateways[$pm]) && array_key_first($gateways) !== $pm) {
+            $reordered = [$pm => $gateways[$pm]];
+            foreach ($gateways as $id => $gateway) {
+                if ($id !== $pm) {
+                    $reordered[$id] = $gateway;
+                }
+            }
+            return $reordered;
+        }
+        return $gateways;
     }
 
     /** Every order earns Shopping Credits on the FINAL amount the customer paid —
