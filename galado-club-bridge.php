@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.33.0
+ * Version: 0.34.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.33.0';   // 0.32.0: /best-sellers optional categoryIds scope (category page sort)
+    const VERSION  = '0.34.0';   // 0.32.0: /best-sellers optional categoryIds scope (category page sort)
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -1200,6 +1200,26 @@ final class Galado_Club_Bridge {
                     update_user_meta($uid, '_galado_winback_expires', max($cur, $exp));
                 }
                 return ['ok' => true, 'granted' => $rm, 'available' => $avail + $rm, 'steps' => $steps];
+            },
+        ]);
+
+        // Club -> WP: clear a member's win-back balance entirely (test cleanup / manual reset).
+        register_rest_route('galado-club/v1', '/winback/clear', [
+            'methods'             => 'POST',
+            'permission_callback' => [__CLASS__, 'bridge_auth'],
+            'callback'            => function (WP_REST_Request $request) {
+                $email = sanitize_email((string) $request->get_param('email'));
+                if (!$email) {
+                    return new WP_Error('bad_request', 'email required', ['status' => 400]);
+                }
+                $user = get_user_by('email', $email);
+                if (!$user) {
+                    return ['ok' => true, 'cleared' => false, 'reason' => 'no user'];
+                }
+                delete_user_meta($user->ID, '_galado_winback_rm');
+                delete_user_meta($user->ID, '_galado_winback_steps');
+                delete_user_meta($user->ID, '_galado_winback_expires');
+                return ['ok' => true, 'cleared' => true];
             },
         ]);
 
