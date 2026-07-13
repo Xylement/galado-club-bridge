@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.31.0
+ * Version: 0.32.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.31.0';   // 0.31.0: /best-sellers (30-day rolling unit sales) for iOS Shop rail
+    const VERSION  = '0.32.0';   // 0.32.0: /best-sellers optional categoryIds scope (category page sort)
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -1099,7 +1099,22 @@ final class Galado_Club_Bridge {
                 $days  = (int) $request->get_param('days');
                 $days  = $days > 0 ? min($days, 365) : 30;
                 $limit = (int) $request->get_param('limit');
-                $limit = $limit > 0 ? min($limit, 50) : 12;
+                $limit = $limit > 0 ? min($limit, 100) : 12;
+                // Optional category scope: comma list of product_cat term ids.
+                // An IN subquery (not a JOIN) keeps SUM correct when a product
+                // sits in several of the passed categories.
+                $cat_ids = array_values(array_filter(
+                    array_map('intval', explode(',', (string) $request->get_param('categoryIds'))),
+                    function ($v) { return $v > 0; }
+                ));
+                $cat_where = '';
+                if (!empty($cat_ids)) {
+                    $in = implode(',', $cat_ids);
+                    $cat_where = "AND l.product_id IN ("
+                        . "SELECT tr.object_id FROM {$wpdb->term_relationships} tr "
+                        . "INNER JOIN {$wpdb->term_taxonomy} tt ON tt.term_taxonomy_id = tr.term_taxonomy_id "
+                        . "WHERE tt.taxonomy = 'product_cat' AND tt.term_id IN ($in))";
+                }
                 $since = gmdate('Y-m-d H:i:s', time() - $days * DAY_IN_SECONDS);
                 $stats  = $wpdb->prefix . 'wc_order_stats';
                 $lookup = $wpdb->prefix . 'wc_order_product_lookup';
@@ -1113,6 +1128,7 @@ final class Galado_Club_Bridge {
                          INNER JOIN {$stats} s ON s.order_id = l.order_id
                          WHERE s.date_created >= %s
                            AND s.status IN ('wc-completed', 'wc-processing')
+                           {$cat_where}
                          GROUP BY l.product_id
                          HAVING sold > 0
                          ORDER BY sold DESC
