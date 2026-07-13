@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.34.0
+ * Version: 0.35.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.34.0';   // 0.32.0: /best-sellers optional categoryIds scope (category page sort)
+    const VERSION  = '0.35.0';   // 0.35.0: /app-login-link auto-login into whitelisted My Account pages (warranty)
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -1508,6 +1508,53 @@ final class Galado_Club_Bridge {
             },
         ]);
 
+        // App -> auto-login link into a pre-approved My Account page (e.g. the
+        // warranty list) so the member never meets a WP login form. Bridge-authed:
+        // the club server has already verified the member's own session, and
+        // vouches for `email`. Mirrors /app-pay-link, but the destination is a
+        // whitelisted key -> fixed path (never a raw URL), so it can't open-redirect.
+        register_rest_route('galado-club/v1', '/app-login-link', [
+            'methods'             => 'POST',
+            'permission_callback' => [__CLASS__, 'bridge_auth'],
+            'callback'            => function (WP_REST_Request $request) {
+                $p     = $request->get_json_params();
+                $email = sanitize_email((string) ($p['email'] ?? ''));
+                $path  = self::app_login_dest(sanitize_key((string) ($p['dest'] ?? '')));
+                $user  = $email ? get_user_by('email', $email) : false;
+                if (!$user || !$path) {
+                    return new WP_Error('bad_request', 'unknown member or destination', ['status' => 400]);
+                }
+                $token = wp_generate_password(48, false, false);
+                set_transient('gld_app_login_' . $token, [
+                    'uid'  => (int) $user->ID,
+                    'path' => $path,
+                ], 10 * MINUTE_IN_SECONDS);
+                return ['login_url' => rest_url('galado-club/v1/app-login/' . $token)];
+            },
+        ]);
+
+        // Browser-facing half: a single-use token signs the member's WP session
+        // in and lands on the pre-approved page. Only ever redirects on-site
+        // (home_url + a whitelisted relative path).
+        register_rest_route('galado-club/v1', '/app-login/(?P<token>[A-Za-z0-9]{20,64})', [
+            'methods'             => 'GET',
+            'permission_callback' => '__return_true',
+            'callback'            => function (WP_REST_Request $request) {
+                $token = (string) $request['token'];
+                $data  = get_transient('gld_app_login_' . $token);
+                delete_transient('gld_app_login_' . $token); // single use, even when invalid
+                $user  = is_array($data) ? get_user_by('id', absint($data['uid'] ?? 0)) : false;
+                $path  = is_array($data) ? (string) ($data['path'] ?? '') : '';
+                if (!$user || '' === $path) {
+                    wp_safe_redirect(home_url('/')); // expired link: plain storefront
+                    exit;
+                }
+                wp_set_auth_cookie($user->ID, false);
+                wp_safe_redirect(home_url($path));
+                exit;
+            },
+        ]);
+
         register_rest_route('galado-club/v1', '/order-email', [
             'methods'             => 'POST',
             'permission_callback' => [__CLASS__, 'bridge_auth'],
@@ -1665,6 +1712,19 @@ final class Galado_Club_Bridge {
             'order' => (int) $order->get_id(),
         ], 10 * MINUTE_IN_SECONDS);
         return rest_url('galado-club/v1/app-pay/' . $token);
+    }
+
+    /** Whitelist of app auto-login destinations -> fixed on-site relative paths.
+     *  The app never sends a raw URL, only one of these keys, so /app-login can
+     *  never be turned into an open redirect. */
+    private static function app_login_dest($dest) {
+        $map = [
+            'warranties'   => '/my-account/warranties/',
+            'orders'       => '/my-account/orders/',
+            'account'      => '/my-account/',
+            'edit-address' => '/my-account/edit-address/',
+        ];
+        return $map[$dest] ?? '';
     }
 
     /* ── Mid-Year Member Sale helpers (see MYS_* constants for the what/why) ─────────
