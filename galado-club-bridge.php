@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.30.6
+ * Version: 0.31.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.30.6';
+    const VERSION  = '0.31.0';   // 0.31.0: /best-sellers (30-day rolling unit sales) for iOS Shop rail
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -1084,6 +1084,55 @@ final class Galado_Club_Bridge {
                 }
                 WC_Points_Rewards_Manager::increase_points($wp_user->ID, $points, 'galado-pos-credit');
                 return ['ok' => true, 'added' => $points, 'balance' => (int) WC_Points_Rewards_Manager::get_users_points($wp_user->ID)];
+            },
+        ]);
+
+        // 30-day (rolling-window) best sellers by real unit sales, for the iOS
+        // app's Shop rail. The Store API's orderby=popularity is all-time
+        // total_sales; a windowed ranking needs the WC Analytics lookup tables,
+        // which require admin access the app deliberately does not carry.
+        register_rest_route('galado-club/v1', '/best-sellers', [
+            'methods'             => 'POST',
+            'permission_callback' => [__CLASS__, 'bridge_auth'],
+            'callback'            => function (WP_REST_Request $request) {
+                global $wpdb;
+                $days  = (int) $request->get_param('days');
+                $days  = $days > 0 ? min($days, 365) : 30;
+                $limit = (int) $request->get_param('limit');
+                $limit = $limit > 0 ? min($limit, 50) : 12;
+                $since = gmdate('Y-m-d H:i:s', time() - $days * DAY_IN_SECONDS);
+                $stats  = $wpdb->prefix . 'wc_order_stats';
+                $lookup = $wpdb->prefix . 'wc_order_product_lookup';
+                $ids = [];
+                if ($wpdb->get_var("SHOW TABLES LIKE '{$lookup}'") === $lookup) {
+                    // Over-fetch, then collapse variations to parents + drop
+                    // unpublished, so we still land `limit` live products.
+                    $rows = $wpdb->get_results($wpdb->prepare(
+                        "SELECT l.product_id AS id, SUM(l.product_qty) AS sold
+                         FROM {$lookup} l
+                         INNER JOIN {$stats} s ON s.order_id = l.order_id
+                         WHERE s.date_created >= %s
+                           AND s.status IN ('wc-completed', 'wc-processing')
+                         GROUP BY l.product_id
+                         HAVING sold > 0
+                         ORDER BY sold DESC
+                         LIMIT %d",
+                        $since,
+                        $limit * 3
+                    ));
+                    foreach ((array) $rows as $r) {
+                        $pid  = (int) $r->id;
+                        $post = get_post($pid);
+                        if ($post && $post->post_type === 'product_variation') {
+                            $pid = (int) $post->post_parent;
+                        }
+                        if ($pid && get_post_status($pid) === 'publish' && !in_array($pid, $ids, true)) {
+                            $ids[] = $pid;
+                        }
+                        if (count($ids) >= $limit) { break; }
+                    }
+                }
+                return new WP_REST_Response(['days' => $days, 'ids' => array_values($ids)], 200);
             },
         ]);
 
