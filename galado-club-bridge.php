@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.35.0
+ * Version: 0.36.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.35.0';   // 0.35.0: /app-login-link auto-login into whitelisted My Account pages (warranty)
+    const VERSION  = '0.36.0';   // 0.36.0: app-view CSS strips storefront chrome on My Account (warranty) in iOS webview
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -79,6 +79,11 @@ final class Galado_Club_Bridge {
         add_action('woocommerce_store_api_checkout_update_order_from_request', [__CLASS__, 'capture_referral'], 10, 1);
         // Club welcome offer: capture ?welcome=<signed token> into a 30-day cookie.
         add_action('wp_footer', [__CLASS__, 'welcome_cookie_script']);
+        // iOS app webview: the auto-login link (/app-login) drops a `galado_app`
+        // cookie; on My Account pages, strip the storefront chrome + account nav so
+        // the warranty list reads like a native app screen, not a full web page.
+        add_filter('body_class', [__CLASS__, 'app_view_body_class']);
+        add_action('wp_head', [__CLASS__, 'app_view_styles'], 99);
         // First-order discount: the bigger of the Club welcome (RM30) or referral (RM10), never both.
         add_action('woocommerce_cart_calculate_fees', [__CLASS__, 'first_order_discount']);
         // Reactivation win-back discount (existing customers, min-cart, from unlocked Club RM).
@@ -1550,6 +1555,16 @@ final class Galado_Club_Bridge {
                     exit;
                 }
                 wp_set_auth_cookie($user->ID, false);
+                // Mark this browsing session as the in-app webview so app_view_styles
+                // strips the storefront chrome on the pages it lands on. Session cookie,
+                // only ever set on the app auto-login path (never on the public site).
+                setcookie('galado_app', '1', [
+                    'expires'  => 0,
+                    'path'     => '/',
+                    'secure'   => true,
+                    'httponly' => true,
+                    'samesite' => 'Lax',
+                ]);
                 wp_safe_redirect(home_url($path));
                 exit;
             },
@@ -1725,6 +1740,47 @@ final class Galado_Club_Bridge {
             'edit-address' => '/my-account/edit-address/',
         ];
         return $map[$dest] ?? '';
+    }
+
+    /** True when the current request is the iOS app webview (set by /app-login). */
+    private static function is_app_view() {
+        return !empty($_COOKIE['galado_app']);
+    }
+
+    /** Tag the <body> so the app-view CSS can scope to it. */
+    public static function app_view_body_class($classes) {
+        if (self::is_app_view()) {
+            $classes[] = 'galado-app';
+        }
+        return $classes;
+    }
+
+    /** In the app webview, strip the storefront chrome + My Account nav so a page
+     *  like the warranty list reads as a focused, native-feeling screen. Scoped to
+     *  `.galado-app` (cookie-gated) so it never touches the public site; only emits
+     *  on My Account pages. */
+    public static function app_view_styles() {
+        if (!self::is_app_view() || !function_exists('is_account_page') || !is_account_page()) {
+            return;
+        }
+        echo '<style id="gld-app-view">'
+            . 'body.galado-app #top-bar,'
+            . 'body.galado-app #header,'
+            . 'body.galado-app .header-wrapper,'
+            . 'body.galado-app #footer,'
+            . 'body.galado-app .absolute-footer,'
+            . 'body.galado-app .woocommerce-store-notice,'
+            . 'body.galado-app .my-account .vertical-tabs>.large-3.col{display:none!important}'
+            . 'body.galado-app .my-account .vertical-tabs{margin:0!important}'
+            . 'body.galado-app .my-account .vertical-tabs>.large-9.col{flex:0 0 100%!important;max-width:100%!important;padding:0!important}'
+            . 'body.galado-app .page-wrapper.my-account{padding:10px 14px 28px!important}'
+            . 'body.galado-app .woocommerce-MyAccount-content{padding:0!important}'
+            . 'body.galado-app .gwarr-warranty-card{width:auto!important;max-width:100%!important;box-sizing:border-box!important}'
+            . 'body.galado-app .gwarr-warranty-head{flex-wrap:wrap!important;row-gap:6px!important}'
+            . 'body.galado-app .gwarr-meta{grid-template-columns:1fr!important;gap:2px 0!important}'
+            . 'body.galado-app .gwarr-meta dd{margin:0 0 6px!important}'
+            . 'body.galado-app .gwarr-product{overflow-wrap:anywhere!important;word-break:break-word!important}'
+            . '</style>';
     }
 
     /* ── Mid-Year Member Sale helpers (see MYS_* constants for the what/why) ─────────
