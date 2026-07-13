@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.32.0
+ * Version: 0.33.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,11 +21,16 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.32.0';   // 0.32.0: /best-sellers optional categoryIds scope (category page sort)
+    const VERSION  = '0.33.0';   // 0.32.0: /best-sellers optional categoryIds scope (category page sort)
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
     const WELCOME30_MIN    = 120;// min cart subtotal (RM) for the Club welcome offer
+    // Reactivation win-back: an auto-applied discount for EXISTING customers who unlocked RM off
+    // in the Club (RM10 per RM50 of cart). Amount lives in user meta _galado_winback_rm (+ expiry),
+    // pushed by the Club; consumed on order payment. Protects margin via the min-cart ratio.
+    const WINBACK_MIN  = 50; // RM min cart subtotal per WINBACK_STEP of discount
+    const WINBACK_STEP = 10; // RM discount unlocked per WINBACK_MIN of cart
 
     // ── Mid-Year Member Sale (Thu 16 – Sun 19 Jul 2026, MYT) — SPEC-MIDYEAR-SALE-STORE.md ──
     // Members (= any logged-in customer; every store account is Club-provisioned since the
@@ -76,6 +81,13 @@ final class Galado_Club_Bridge {
         add_action('wp_footer', [__CLASS__, 'welcome_cookie_script']);
         // First-order discount: the bigger of the Club welcome (RM30) or referral (RM10), never both.
         add_action('woocommerce_cart_calculate_fees', [__CLASS__, 'first_order_discount']);
+        // Reactivation win-back discount (existing customers, min-cart, from unlocked Club RM).
+        add_action('woocommerce_cart_calculate_fees', [__CLASS__, 'winback_discount']);
+        add_action('woocommerce_checkout_create_order', [__CLASS__, 'capture_winback'], 10, 1);
+        add_action('woocommerce_store_api_checkout_update_order_from_request', [__CLASS__, 'capture_winback'], 10, 1);
+        // Consume the applied win-back RM once the order is paid (idempotent per order).
+        add_action('woocommerce_order_status_processing', [__CLASS__, 'consume_winback'], 20, 1);
+        add_action('woocommerce_order_status_completed', [__CLASS__, 'consume_winback'], 20, 1);
         // POS (pos.galado.com.my) orders carry _pos_order meta: the sale happened at the
         // counter, so suppress WooCommerce CUSTOMER emails and keep the order out of
         // Klaviyo (flows like post-purchase would otherwise fire on walk-in sales).
@@ -455,6 +467,72 @@ final class Galado_Club_Bridge {
         if (!empty($_COOKIE['galado_ref']) && $subtotal >= self::WELCOME_MIN) {
             $cart->add_fee(__('Referral welcome: RM10 off your first order', 'galado-club'), -1 * self::WELCOME_AMOUNT, false);
         }
+    }
+
+    /**
+     * Reactivation win-back discount. Auto-applies the member's unlocked Club RM (from user meta,
+     * pushed by the Club) as a negative fee, capped at RM10 per RM50 of cart so margin is protected.
+     * For EXISTING customers (the whole point is bringing them back), so no new-customer gate.
+     */
+    public static function winback_discount($cart) {
+        if ((is_admin() && !defined('DOING_AJAX')) || !function_exists('WC') || !is_user_logged_in()) {
+            return;
+        }
+        $uid   = get_current_user_id();
+        $avail = (float) get_user_meta($uid, '_galado_winback_rm', true);
+        if ($avail <= 0) {
+            return;
+        }
+        $expires = (int) get_user_meta($uid, '_galado_winback_expires', true);
+        if ($expires && time() > $expires) {
+            return;
+        }
+        $subtotal = (float) $cart->get_subtotal();
+        $by_cart  = floor($subtotal / self::WINBACK_MIN) * self::WINBACK_STEP;
+        $discount = min($avail, $by_cart);
+        if ($discount <= 0) {
+            return;
+        }
+        $cart->add_fee(sprintf(__('GALADO Club reward: RM%d off', 'galado-club'), $discount), -1 * $discount, false);
+    }
+
+    /** Stamp the win-back discount actually applied onto the order, so payment can consume it once. */
+    public static function capture_winback($order) {
+        if (!$order || !function_exists('WC') || !WC()->cart) {
+            return;
+        }
+        $applied = 0.0;
+        foreach (WC()->cart->get_fees() as $fee) {
+            if (strpos($fee->name, 'GALADO Club reward') === 0) {
+                $applied += abs((float) $fee->amount);
+            }
+        }
+        if ($applied > 0) {
+            $order->update_meta_data('_galado_winback_applied', $applied);
+        }
+    }
+
+    /** On payment, subtract the applied win-back RM from the member's balance. Idempotent per order. */
+    public static function consume_winback($order_id) {
+        $order = wc_get_order($order_id);
+        if (!$order || $order->get_meta('_galado_winback_consumed')) {
+            return;
+        }
+        $applied = (float) $order->get_meta('_galado_winback_applied');
+        if ($applied <= 0) {
+            return;
+        }
+        $uid = $order->get_user_id();
+        if (!$uid) {
+            $u = get_user_by('email', $order->get_billing_email());
+            $uid = $u ? $u->ID : 0;
+        }
+        if ($uid) {
+            $avail = (float) get_user_meta($uid, '_galado_winback_rm', true);
+            update_user_meta($uid, '_galado_winback_rm', max(0, $avail - $applied));
+        }
+        $order->update_meta_data('_galado_winback_consumed', '1');
+        $order->save();
     }
 
     /** True if this shopper has a prior paid order (logged-in, or guest matched by billing email). */
@@ -1084,6 +1162,44 @@ final class Galado_Club_Bridge {
                 }
                 WC_Points_Rewards_Manager::increase_points($wp_user->ID, $points, 'galado-pos-credit');
                 return ['ok' => true, 'added' => $points, 'balance' => (int) WC_Points_Rewards_Manager::get_users_points($wp_user->ID)];
+            },
+        ]);
+
+        // Club -> WP: grant one win-back discount step (RM off) to a member's store account.
+        // Idempotent per `step` (onboard|wallet): re-pushing a step never double-adds.
+        register_rest_route('galado-club/v1', '/winback/grant', [
+            'methods'             => 'POST',
+            'permission_callback' => [__CLASS__, 'bridge_auth'],
+            'callback'            => function (WP_REST_Request $request) {
+                $email = sanitize_email((string) $request->get_param('email'));
+                $step  = preg_replace('/[^a-z]/', '', (string) $request->get_param('step'));
+                $rm    = absint($request->get_param('rm'));
+                $exp_r = (string) $request->get_param('expiresAt');
+                if (!$email || !in_array($step, ['onboard', 'wallet'], true) || $rm < 1 || $rm > 100) {
+                    return new WP_Error('bad_request', 'email, step (onboard|wallet), rm required', ['status' => 400]);
+                }
+                $user = get_user_by('email', $email);
+                if (!$user) {
+                    return new WP_Error('not_found', 'no user with that email', ['status' => 404]);
+                }
+                $uid   = $user->ID;
+                $steps = get_user_meta($uid, '_galado_winback_steps', true);
+                if (!is_array($steps)) {
+                    $steps = [];
+                }
+                if (in_array($step, $steps, true)) {
+                    return ['ok' => true, 'already' => true, 'available' => (float) get_user_meta($uid, '_galado_winback_rm', true)];
+                }
+                $avail = (float) get_user_meta($uid, '_galado_winback_rm', true);
+                update_user_meta($uid, '_galado_winback_rm', $avail + $rm);
+                $steps[] = $step;
+                update_user_meta($uid, '_galado_winback_steps', $steps);
+                $exp = strtotime($exp_r);
+                if ($exp) {
+                    $cur = (int) get_user_meta($uid, '_galado_winback_expires', true);
+                    update_user_meta($uid, '_galado_winback_expires', max($cur, $exp));
+                }
+                return ['ok' => true, 'granted' => $rm, 'available' => $avail + $rm, 'steps' => $steps];
             },
         ]);
 
