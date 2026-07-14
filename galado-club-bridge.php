@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.38.0
+ * Version: 0.39.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.38.0';   // 0.37.0: /coupon-meta (type+amount) for app cart coupon preview on customised lines
+    const VERSION  = '0.39.0';   // 0.39.0: stock-status -> Club webhook (app wishlist back-in-stock push)
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -84,6 +84,9 @@ final class Galado_Club_Bridge {
         // the warranty list reads like a native app screen, not a full web page.
         add_filter('body_class', [__CLASS__, 'app_view_body_class']);
         add_action('wp_head', [__CLASS__, 'app_view_styles'], 99);
+        // Product back in stock -> tell the Club so app wishlisters get a push
+        // (the Club dedups per member/product, so re-fires are harmless).
+        add_action('woocommerce_product_set_stock_status', [__CLASS__, 'on_stock_status'], 10, 3);
         // First-order discount: the bigger of the Club welcome (RM30) or referral (RM10), never both.
         add_action('woocommerce_cart_calculate_fees', [__CLASS__, 'first_order_discount']);
         // Reactivation win-back discount (existing customers, min-cart, from unlocked Club RM).
@@ -1763,6 +1766,33 @@ final class Galado_Club_Bridge {
             'edit-address' => '/my-account/edit-address/',
         ];
         return $map[$dest] ?? '';
+    }
+
+    /** Product flipped to instock -> notify the Club (app wishlist pushes).
+     *  Variations report their PARENT id: the app wishlists parent products. */
+    public static function on_stock_status($product_id, $status, $product = null) {
+        if ('instock' !== $status) {
+            return;
+        }
+        $secret = self::bridge_secret();
+        if ('' === $secret) {
+            return;
+        }
+        $p = $product instanceof WC_Product ? $product : wc_get_product($product_id);
+        if (!$p) {
+            return;
+        }
+        $parent_id = $p->get_parent_id() ?: $p->get_id();
+        $parent    = $parent_id === $p->get_id() ? $p : wc_get_product($parent_id);
+        wp_remote_post(self::club_url() . '/webhooks/stock', [
+            'timeout'  => 4,
+            'blocking' => false, // fire-and-forget; the Club dedups
+            'headers'  => ['content-type' => 'application/json', 'x-club-bridge-secret' => $secret],
+            'body'     => wp_json_encode([
+                'product_id' => (int) $parent_id,
+                'name'       => $parent ? html_entity_decode(wp_strip_all_tags($parent->get_name())) : '',
+            ]),
+        ]);
     }
 
     /** True when the current request is the iOS app webview (set by /app-login). */
