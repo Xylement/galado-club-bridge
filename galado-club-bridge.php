@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.37.0
+ * Version: 0.38.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.37.0';   // 0.37.0: /coupon-meta (type+amount) for app cart coupon preview on customised lines
+    const VERSION  = '0.38.0';   // 0.37.0: /coupon-meta (type+amount) for app cart coupon preview on customised lines
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -1987,7 +1987,7 @@ final class Galado_Club_Bridge {
 #gldpj .pj-done .pj-em{font-size:40px;line-height:1;}
 #gldpj .pj-done h3{margin:10px 0 6px;font-family:'Archivo','Arial Black',Arial,sans-serif;font-weight:900;font-size:22px;color:#111;}
 #gldpj .pj-done p{margin:0 0 6px;font-size:14px;color:#4A4A4A;line-height:1.6;}
-#gldpj-min{position:fixed;left:18px;bottom:18px;z-index:999998;width:52px;height:52px;border-radius:50%;background:#fff;border:2px solid #111111;box-shadow:0 6px 18px rgba(17,17,17,.22);cursor:pointer;padding:0;align-items:center;justify-content:center;transition:transform .15s;}
+#gldpj-min{position:fixed;left:18px;bottom:18px;z-index:999998;width:52px;height:52px;border-radius:50%;background:#fff;border:2px solid #111111;box-shadow:0 6px 18px rgba(17,17,17,.22);cursor:pointer;padding:0;align-items:center;justify-content:center;transition:transform .15s;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;}
 #gldpj-min:hover{transform:scale(1.08);}
 #gldpj-min img{width:30px;height:auto;display:block;margin:0 auto;}
 @media (max-width:640px){
@@ -2057,10 +2057,46 @@ function hideChip(){chips().forEach(function(c){c.style.display='none'})}
 function openAll(){boxes().forEach(function(b){b.classList.add('on');b.style.display='flex'});hideChip()}
 function closeAll(d){if(!isOpen())return;boxes().forEach(function(b){b.classList.remove('on');b.style.display='none'});showChip();if(d)save({snooze:Date.now()+d*864e5})}
 function joined(){hideChip();save({joined:true})}
+/* Minimised coin is draggable (pointer events = touch + mouse): it sits bottom-left by
+   default, which can cover a product page's sticky add-to-cart price bar - so customers
+   can move it anywhere; the spot is remembered across pages. A plain tap still opens
+   the popup; only a real drag (>6px) suppresses the click that follows it. */
+var GLDPJ_DRAG_AT=0,PKEY='gldpj_pos_v1';
+function clampPos(pos,c){var w=c.offsetWidth||52,h=c.offsetHeight||52,M=8;
+return{x:Math.min(Math.max(pos.x,M),(window.innerWidth||360)-w-M),
+y:Math.min(Math.max(pos.y,M),(window.innerHeight||640)-h-M)}}
+function applyPos(){var p=null;try{p=JSON.parse(localStorage.getItem(PKEY)||'null')}catch(e){}
+if(!p||typeof p.x!=='number'||typeof p.y!=='number')return;
+chips().forEach(function(c){var q=clampPos(p,c);
+c.style.left=q.x+'px';c.style.top=q.y+'px';c.style.bottom='auto';c.style.right='auto'})}
+if(window.PointerEvent)chips().forEach(function(c){
+var pid=null,sx=0,sy=0,ox=0,oy=0,moved=false;
+c.addEventListener('pointerdown',function(e){
+if(e.button&&e.button!==0)return;
+pid=e.pointerId;moved=false;sx=e.clientX;sy=e.clientY;
+var r=c.getBoundingClientRect();ox=r.left;oy=r.top;
+try{c.setPointerCapture(pid)}catch(err){}});
+c.addEventListener('pointermove',function(e){
+if(pid===null||e.pointerId!==pid)return;
+var dx=e.clientX-sx,dy=e.clientY-sy;
+if(!moved&&(dx*dx+dy*dy)<36)return;
+moved=true;
+var q=clampPos({x:ox+dx,y:oy+dy},c);
+c.style.left=q.x+'px';c.style.top=q.y+'px';c.style.bottom='auto';c.style.right='auto'});
+function endDrag(e){
+if(pid===null||(e.pointerId!==undefined&&e.pointerId!==pid))return;
+pid=null;
+if(moved){GLDPJ_DRAG_AT=Date.now();
+var r=c.getBoundingClientRect();
+try{localStorage.setItem(PKEY,JSON.stringify({x:r.left,y:r.top}))}catch(err){}}}
+c.addEventListener('pointerup',endDrag);
+c.addEventListener('pointercancel',endDrag);});
+window.addEventListener('resize',applyPos);
+applyPos();
 document.addEventListener('keydown',function(e){if(e.key==='Escape')closeAll(7)});
 document.addEventListener('click',function(e){
 var t=e.target;if(!t)return;
-if(t.closest&&t.closest('#gldpj-min')){openAll();return}
+if(t.closest&&t.closest('#gldpj-min')){if(Date.now()-GLDPJ_DRAG_AT<400)return;openAll();return}
 if(!isOpen())return;
 if(t.id==='gldpj'){closeAll(7);return}
 if(!t.closest)return;
