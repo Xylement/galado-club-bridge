@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.36.0
+ * Version: 0.37.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.36.0';   // 0.36.0: app-view CSS strips storefront chrome on My Account (warranty) in iOS webview
+    const VERSION  = '0.37.0';   // 0.37.0: /coupon-meta (type+amount) for app cart coupon preview on customised lines
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -1567,6 +1567,29 @@ final class Galado_Club_Bridge {
                 ]);
                 wp_safe_redirect(home_url($path));
                 exit;
+            },
+        ]);
+
+        // App -> coupon metadata (type + amount) so the cart can EXPLAIN a
+        // coupon on customised lines, which live app-side until the order is
+        // created (the Store API cart shows RM0 discount for them, reading as
+        // "coupon broken"). Read-only meta; validity is still enforced at
+        // order creation by apply_coupon().
+        register_rest_route('galado-club/v1', '/coupon-meta', [
+            'methods'             => 'POST',
+            'permission_callback' => [__CLASS__, 'bridge_auth'],
+            'callback'            => function (WP_REST_Request $request) {
+                $p    = $request->get_json_params();
+                $code = wc_format_coupon_code((string) ($p['code'] ?? ''));
+                if ('' === $code || !wc_get_coupon_id_by_code($code)) {
+                    return new WP_Error('not_found', 'coupon not found', ['status' => 404]);
+                }
+                $coupon = new WC_Coupon($code);
+                return [
+                    'code'   => $coupon->get_code(),
+                    'type'   => $coupon->get_discount_type(), // percent | fixed_cart | fixed_product
+                    'amount' => (float) $coupon->get_amount(),
+                ];
             },
         ]);
 
