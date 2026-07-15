@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.39.0
+ * Version: 0.40.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.39.0';   // 0.39.0: stock-status -> Club webhook (app wishlist back-in-stock push)
+    const VERSION  = '0.40.0';   // 0.40.0: /app-stats (app orders+revenue) for CP iOS App panel
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -1570,6 +1570,55 @@ final class Galado_Club_Bridge {
                 ]);
                 wp_safe_redirect(home_url($path));
                 exit;
+            },
+        ]);
+
+        // CP's iOS App panel: paid orders the app produced. Two markers, one
+        // union: `_galado_app_order` meta (customised/bundle orders created by
+        // /app-order) and created_via=store-api (native cart checkouts — the
+        // app is the only store-api client).
+        register_rest_route('galado-club/v1', '/app-stats', [
+            'methods'             => 'GET',
+            'permission_callback' => [__CLASS__, 'bridge_auth'],
+            'callback'            => function () {
+                $paid = ['processing', 'completed', 'on-hold'];
+                $meta_ids = wc_get_orders([
+                    'limit'      => -1,
+                    'return'     => 'ids',
+                    'status'     => $paid,
+                    'meta_key'   => '_galado_app_order',
+                    'meta_value' => '1',
+                ]);
+                $api_ids = wc_get_orders([
+                    'limit'       => -1,
+                    'return'      => 'ids',
+                    'status'      => $paid,
+                    'created_via' => 'store-api',
+                ]);
+                $ids     = array_values(array_unique(array_merge($meta_ids, $api_ids)));
+                $cut     = strtotime('-30 days');
+                $revenue = 0.0;
+                $d30     = 0;
+                $rev30   = 0.0;
+                foreach ($ids as $id) {
+                    $order = wc_get_order($id);
+                    if (!$order) {
+                        continue;
+                    }
+                    $total    = (float) $order->get_total();
+                    $revenue += $total;
+                    $created  = $order->get_date_created();
+                    if ($created && $created->getTimestamp() >= $cut) {
+                        $d30++;
+                        $rev30 += $total;
+                    }
+                }
+                return [
+                    'orders'      => count($ids),
+                    'revenue'     => round($revenue, 2),
+                    'orders_30d'  => $d30,
+                    'revenue_30d' => round($rev30, 2),
+                ];
             },
         ]);
 
