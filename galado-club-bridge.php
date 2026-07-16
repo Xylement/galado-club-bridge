@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.42.0
+ * Version: 0.42.1
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.42.0';   // 0.42.0: Mid-Year CTA dest -> /collections/member-price/ (store-login whitelist)
+    const VERSION  = '0.42.1';   // 0.42.1: Mid-Year sale - hide guest join-to-unlock prompt on hero PDPs (members unchanged)
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -2024,15 +2024,9 @@ final class Galado_Club_Bridge {
         }
         if (is_user_logged_in()) {
             echo '<p style="margin:6px 0 14px;font-weight:700;color:#0E7A57;">&#10022; GALADO Club member price applied (20% off)</p>';
-            return;
         }
-        $member_price = wc_price(round(((float) $product->get_price()) * self::MYS_FACTOR, 2));
-        echo '<div style="margin:6px 0 16px;padding:14px 16px;border:2px solid #111111;border-radius:14px;background:#FFF7F2;">'
-            . '<p style="margin:0 0 4px;font-weight:800;color:#111111;">GALADO Club members pay ' . wp_kses_post($member_price) . ' on this (20% off)</p>'
-            . '<p style="margin:0 0 10px;font-size:13px;color:#5f5f66;">Free to join, takes one tap. Free shipping stays, of course.</p>'
-            . '<a href="https://club.galado.com.my/?src=midyear-store" style="display:inline-block;background:#E4002B;color:#fff;font-weight:800;border-radius:999px;padding:10px 18px;text-decoration:none;">Join the Club free</a>'
-            . '<a href="' . esc_url(wc_get_page_permalink('myaccount')) . '" style="display:inline-block;margin-left:12px;font-weight:700;color:#111111;">Already a member? Log in</a>'
-            . '</div>';
+        // Guests: no prompt during the sale. Normal price shows; no join-to-unlock distraction.
+        // (Member price itself is applied by the login-gated price filters, not here, so pricing is unaffected.)
     }
 
     /* -- Club join popup (2026-07-08, replaces the retired Klaviyo popup) -----------
