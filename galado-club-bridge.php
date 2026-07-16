@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.40.0
+ * Version: 0.41.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.40.0';   // 0.40.0: /app-stats (app orders+revenue) for CP iOS App panel
+    const VERSION  = '0.41.0';   // 0.41.0: /store-login (Club-web -> store auto-login, no app chrome) for Mid-Year banner
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -1573,6 +1573,52 @@ final class Galado_Club_Bridge {
             },
         ]);
 
+        // Club web -> store auto-login. Same single-use, whitelisted-destination pattern as
+        // /app-login, but for the normal browser (Club dashboard outbound store links): it does
+        // NOT set the galado_app chrome-stripping cookie, so the member lands on the full
+        // storefront, signed in, at their member price. Bridge-authed mint; 10 min TTL; single use.
+        register_rest_route('galado-club/v1', '/store-login-link', [
+            'methods'             => 'POST',
+            'permission_callback' => [__CLASS__, 'bridge_auth'],
+            'callback'            => function (WP_REST_Request $request) {
+                $p     = $request->get_json_params();
+                $email = sanitize_email((string) ($p['email'] ?? ''));
+                $path  = self::store_login_dest(sanitize_key((string) ($p['dest'] ?? '')));
+                $user  = $email ? get_user_by('email', $email) : false;
+                if (!$user || !$path) {
+                    return new WP_Error('bad_request', 'unknown member or destination', ['status' => 400]);
+                }
+                $token = wp_generate_password(48, false, false);
+                set_transient('gld_store_login_' . $token, [
+                    'uid'  => (int) $user->ID,
+                    'path' => $path,
+                ], 10 * MINUTE_IN_SECONDS);
+                return ['login_url' => rest_url('galado-club/v1/store-login/' . $token)];
+            },
+        ]);
+
+        // Browser-facing half: a single-use token signs the member's WP session in and lands on
+        // the pre-approved store page (home_url + a whitelisted relative path). No app cookie, so
+        // the storefront keeps its normal chrome.
+        register_rest_route('galado-club/v1', '/store-login/(?P<token>[A-Za-z0-9]{20,64})', [
+            'methods'             => 'GET',
+            'permission_callback' => '__return_true',
+            'callback'            => function (WP_REST_Request $request) {
+                $token = (string) $request['token'];
+                $data  = get_transient('gld_store_login_' . $token);
+                delete_transient('gld_store_login_' . $token); // single use, even when invalid
+                $user  = is_array($data) ? get_user_by('id', absint($data['uid'] ?? 0)) : false;
+                $path  = is_array($data) ? (string) ($data['path'] ?? '') : '';
+                if (!$user || '' === $path) {
+                    wp_safe_redirect(home_url('/')); // expired link: plain storefront
+                    exit;
+                }
+                wp_set_auth_cookie($user->ID, false);
+                wp_safe_redirect(home_url($path));
+                exit;
+            },
+        ]);
+
         // CP's iOS App panel: paid orders the app produced. Two markers, one
         // union: `_galado_app_order` meta (customised/bundle orders created by
         // /app-order) and created_via=store-api (native cart checkouts — the
@@ -1813,6 +1859,18 @@ final class Galado_Club_Bridge {
             'orders'       => '/my-account/orders/',
             'account'      => '/my-account/',
             'edit-address' => '/my-account/edit-address/',
+        ];
+        return $map[$dest] ?? '';
+    }
+
+    /** Whitelist of Club-web -> store auto-login destinations -> fixed on-site relative paths.
+     *  Only whitelisted keys are ever accepted (never a raw URL), so /store-login can never be
+     *  turned into an open redirect. Used by the Club dashboard's outbound store links. */
+    private static function store_login_dest($dest) {
+        $map = [
+            'shop'        => '/shop/',
+            'mys-stylink' => '/product/stylink-metal-chain/',
+            'mys-luna'    => '/product/luna-guard/',
         ];
         return $map[$dest] ?? '';
     }
