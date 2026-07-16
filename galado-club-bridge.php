@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.41.0
+ * Version: 0.42.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.41.0';   // 0.41.0: /store-login (Club-web -> store auto-login, no app chrome) for Mid-Year banner
+    const VERSION  = '0.42.0';   // 0.42.0: Mid-Year CTA dest -> /collections/member-price/ (store-login whitelist)
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -1868,9 +1868,9 @@ final class Galado_Club_Bridge {
      *  turned into an open redirect. Used by the Club dashboard's outbound store links. */
     private static function store_login_dest($dest) {
         $map = [
-            'shop'        => '/shop/',
-            'mys-stylink' => '/product/stylink-metal-chain/',
-            'mys-luna'    => '/product/luna-guard/',
+            'mys-collection' => '/collections/member-price/',
+            'mys-stylink'    => '/product/stylink-metal-chain/',
+            'mys-luna'       => '/product/luna-guard/',
         ];
         return $map[$dest] ?? '';
     }
