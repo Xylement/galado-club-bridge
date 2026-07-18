@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.43.1
+ * Version: 0.44.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.43.1';   // 0.43.1: fix coin X (skip pointer-capture on the X badge so its click closes instead of reopening the popup)
+    const VERSION  = '0.44.0';   // 0.44.0: member (MYS) price never applies to the wc/v3 REST API (POS always sees original price)
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -1970,8 +1970,24 @@ final class Galado_Club_Bridge {
         return in_array((int) $id, self::MYS_HEROES, true) ? (int) $id : 0;
     }
 
+    /** Member pricing is a storefront concept: it must reach real shoppers (classic
+     *  pages + the Store API block cart/checkout) but NEVER the programmatic wc/v3
+     *  REST API. The POS reads catalogue prices over wc/v3 authenticated by a
+     *  consumer key, which WooCommerce treats as is_user_logged_in() = true, so
+     *  without this guard the counter would receive the 20%-off member price and be
+     *  unable to charge full price. Allow only the Store API (wc/store/*, block
+     *  cart/checkout) inside REST; every other REST/integration read gets the
+     *  original price. */
+    private static function mys_shopper_context() {
+        if (defined('REST_REQUEST') && REST_REQUEST) {
+            $uri = isset($_SERVER['REQUEST_URI']) ? (string) $_SERVER['REQUEST_URI'] : '';
+            return false !== strpos($uri, '/wc/store/');
+        }
+        return true;
+    }
+
     private static function mys_applies($product) {
-        return self::mys_window_active() && is_user_logged_in() && self::mys_hero_parent($product);
+        return self::mys_window_active() && self::mys_shopper_context() && is_user_logged_in() && self::mys_hero_parent($product);
     }
 
     /** 20% off the current selling price for logged-in members, heroes only. */
@@ -1999,7 +2015,11 @@ final class Galado_Club_Bridge {
     /** Variation price ranges are transient-cached by hash — salt it with the
      *  window + login state so member/guest never share a cached range. */
     public static function mys_prices_hash($hash) {
-        $hash[] = 'mys:' . (self::mys_window_active() ? '1' : '0') . ':' . (is_user_logged_in() ? 'm' : 'g');
+        // Context ('s' shopper / 'x' api-admin) keeps the wc/v3 REST reads (POS) in
+        // their own cached-range bucket so they never inherit a member-priced range.
+        $hash[] = 'mys:' . (self::mys_window_active() ? '1' : '0')
+            . ':' . (is_user_logged_in() ? 'm' : 'g')
+            . ':' . (self::mys_shopper_context() ? 's' : 'x');
         return $hash;
     }
 

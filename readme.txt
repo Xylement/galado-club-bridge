@@ -17,6 +17,12 @@ push-to-Xylement/galado-club-bridge (WP Git Sync), NOT the zips in this folder
 (the v0.2.x zips are obsolete manual-upload relics — do not deploy them).
 
 == Changelog ==
+= 0.44.0 =
+* Member (Mid-Year Sale) pricing no longer leaks to the wc/v3 REST API. The POS
+  reads catalogue prices over wc/v3 (consumer-key auth counts as logged-in), so it
+  was seeing the 20%-off member price and could not charge full price at the
+  counter. Member pricing now applies only on the storefront and the Store API
+  (block cart/checkout); every other REST read gets the original price.
 = 0.25.0 =
 * POS receipt email is queued via Action Scheduler instead of sent inline: the POS
   Send button answers instantly even when SMTP is slow (inline send kept as fallback).
