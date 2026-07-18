@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.42.1
+ * Version: 0.43.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.42.1';   // 0.42.1: Mid-Year sale - hide guest join-to-unlock prompt on hero PDPs (members unchanged)
+    const VERSION  = '0.43.0';   // 0.43.0: X close on the draggable Club coin chip (session-scoped hide)
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -2121,6 +2121,7 @@ final class Galado_Club_Bridge {
 #gldpj-min{position:fixed;left:18px;bottom:18px;z-index:999998;width:52px;height:52px;border-radius:50%;background:#fff;border:2px solid #111111;box-shadow:0 6px 18px rgba(17,17,17,.22);cursor:pointer;padding:0;align-items:center;justify-content:center;transition:transform .15s;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;}
 #gldpj-min:hover{transform:scale(1.08);}
 #gldpj-min img{width:30px;height:auto;display:block;margin:0 auto;}
+#gldpj-min .pj-mx{position:absolute;top:-7px;right:-7px;width:20px;height:20px;border-radius:50%;background:#111111;color:#fff;border:2px solid #fff;font:700 12px/16px Arial,sans-serif;text-align:center;box-shadow:0 2px 6px rgba(17,17,17,.3);}
 @media (max-width:640px){
 #gldpj-min{left:12px;bottom:12px;width:48px;height:48px;}
 #gldpj .pj-vis{min-height:196px;}
@@ -2170,6 +2171,7 @@ final class Galado_Club_Bridge {
 </div>
 <button id="gldpj-min" type="button" aria-label="Join the GALADO Club" title="GALADO Club" style="display:none;">
 <img src="https://club.galado.com.my/coin.png" alt="" loading="lazy"/>
+<span class="pj-mx" title="Hide" aria-label="Hide the Club coin">&times;</span>
 </button>
 <script>
 var GLDPJ_REST=<?php echo wp_json_encode($rest); ?>;
@@ -2183,7 +2185,11 @@ var st=null;try{st=JSON.parse(localStorage.getItem(KEY)||'null')}catch(e){}
 if(st&&st.joined)return;
 function save(o){try{localStorage.setItem(KEY,JSON.stringify(o))}catch(e){}}
 function isOpen(){return boxes().some(function(b){return b.style.display==='flex'})}
-function showChip(){chips().forEach(function(c){c.style.display='flex'})}
+/* X on the coin: hides it for the rest of the browsing session (it can cover the
+   case-designer canvas); back next session so the acquisition surface survives. */
+function chipClosed(){try{return sessionStorage.getItem('gldpj_chip_x')==='1'}catch(e){return false}}
+function closeChip(){try{sessionStorage.setItem('gldpj_chip_x','1')}catch(e){}hideChip()}
+function showChip(){if(chipClosed())return;chips().forEach(function(c){c.style.display='flex'})}
 function hideChip(){chips().forEach(function(c){c.style.display='none'})}
 function openAll(){boxes().forEach(function(b){b.classList.add('on');b.style.display='flex'});hideChip()}
 function closeAll(d){if(!isOpen())return;boxes().forEach(function(b){b.classList.remove('on');b.style.display='none'});showChip();if(d)save({snooze:Date.now()+d*864e5})}
@@ -2227,6 +2233,7 @@ applyPos();
 document.addEventListener('keydown',function(e){if(e.key==='Escape')closeAll(7)});
 document.addEventListener('click',function(e){
 var t=e.target;if(!t)return;
+if(t.closest&&t.closest('#gldpj-min .pj-mx')){e.preventDefault();e.stopPropagation();closeChip();return}
 if(t.closest&&t.closest('#gldpj-min')){if(Date.now()-GLDPJ_DRAG_AT<400)return;openAll();return}
 if(!isOpen())return;
 if(t.id==='gldpj'){closeAll(7);return}
