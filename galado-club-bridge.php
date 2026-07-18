@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.43.0
+ * Version: 0.43.1
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.43.0';   // 0.43.0: X close on the draggable Club coin chip (session-scoped hide)
+    const VERSION  = '0.43.1';   // 0.43.1: fix coin X (skip pointer-capture on the X badge so its click closes instead of reopening the popup)
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -2210,6 +2210,7 @@ if(window.PointerEvent)chips().forEach(function(c){
 var pid=null,sx=0,sy=0,ox=0,oy=0,moved=false;
 c.addEventListener('pointerdown',function(e){
 if(e.button&&e.button!==0)return;
+if(e.target&&e.target.closest&&e.target.closest('.pj-mx'))return; /* X badge: skip drag+pointer-capture so the trailing click keeps .pj-mx as its target and the close branch runs (capture would retarget the click to #gldpj-min and re-open the popup) */
 pid=e.pointerId;moved=false;sx=e.clientX;sy=e.clientY;
 var r=c.getBoundingClientRect();ox=r.left;oy=r.top;
 try{c.setPointerCapture(pid)}catch(err){}});
