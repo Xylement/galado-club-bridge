@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.44.0
+ * Version: 0.45.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.44.0';   // 0.44.0: member (MYS) price never applies to the wc/v3 REST API (POS always sees original price)
+    const VERSION  = '0.45.0';   // 0.45.0: app auto-login destination for the Studio case designer
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -1859,6 +1859,9 @@ final class Galado_Club_Bridge {
             'orders'       => '/my-account/orders/',
             'account'      => '/my-account/',
             'edit-address' => '/my-account/edit-address/',
+            // Case designer opened from the iOS app: signed in (member pricing)
+            // and chrome-stripped via the galado_app cookie.
+            'studio'       => '/studio/',
         ];
         return $map[$dest] ?? '';
     }
