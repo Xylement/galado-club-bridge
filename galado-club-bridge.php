@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.46.0
+ * Version: 0.47.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.46.0';   // 0.46.0: app-view chrome strip also covers the Studio case designer
+    const VERSION  = '0.47.0';   // 0.47.0: custom lines must name a variation on variable products
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -1387,6 +1387,14 @@ final class Galado_Club_Bridge {
                     if (!$product || !$product->is_purchasable()) {
                         $order->delete(true);
                         return new WP_Error('bad_request', 'unknown or unpurchasable product ' . ($vid ?: $pid), ['status' => 400]);
+                    }
+                    // A variable parent passes is_purchasable() and prices at its
+                    // CHEAPEST variation, so a line that forgot variation_id would
+                    // be silently underpriced and have no variation attribute to
+                    // fulfil against. Make the caller name the variation.
+                    if (!$vid && $product->is_type('variable')) {
+                        $order->delete(true);
+                        return new WP_Error('bad_request', 'variation_id required for variable product ' . $pid, ['status' => 400]);
                     }
                     $item_id = $order->add_product($product, $qty);
                     if ($item_id && is_array($l['custom'] ?? null)) {
