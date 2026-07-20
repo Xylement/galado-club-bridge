@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.45.0
+ * Version: 0.46.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.45.0';   // 0.45.0: app auto-login destination for the Studio case designer
+    const VERSION  = '0.46.0';   // 0.46.0: app-view chrome strip also covers the Studio case designer
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -1918,12 +1918,17 @@ final class Galado_Club_Bridge {
         return $classes;
     }
 
-    /** In the app webview, strip the storefront chrome + My Account nav so a page
-     *  like the warranty list reads as a focused, native-feeling screen. Scoped to
-     *  `.galado-app` (cookie-gated) so it never touches the public site; only emits
-     *  on My Account pages. */
+    /** In the app webview, strip the storefront chrome so a page like the warranty
+     *  list or the case designer reads as a focused, native-feeling screen. Scoped
+     *  to `.galado-app` (cookie-gated) so it never touches the public site; emits on
+     *  My Account pages and the Studio designer, which the app opens full-screen. */
     public static function app_view_styles() {
-        if (!self::is_app_view() || !function_exists('is_account_page') || !is_account_page()) {
+        if (!self::is_app_view()) {
+            return;
+        }
+        $is_account = function_exists('is_account_page') && is_account_page();
+        $is_studio  = function_exists('is_page') && is_page('studio');
+        if (!$is_account && !$is_studio) {
             return;
         }
         echo '<style id="gld-app-view">'
@@ -1932,8 +1937,12 @@ final class Galado_Club_Bridge {
             . 'body.galado-app .header-wrapper,'
             . 'body.galado-app #footer,'
             . 'body.galado-app .absolute-footer,'
-            . 'body.galado-app .woocommerce-store-notice,'
-            . 'body.galado-app .my-account .vertical-tabs>.large-3.col{display:none!important}'
+            . 'body.galado-app .woocommerce-store-notice{display:none!important}';
+        if (!$is_account) {
+            echo '</style>';
+            return;
+        }
+        echo 'body.galado-app .my-account .vertical-tabs>.large-3.col{display:none!important}'
             . 'body.galado-app .my-account .vertical-tabs{margin:0!important}'
             . 'body.galado-app .my-account .vertical-tabs>.large-9.col{flex:0 0 100%!important;max-width:100%!important;padding:0!important}'
             . 'body.galado-app .page-wrapper.my-account{padding:10px 14px 28px!important}'
