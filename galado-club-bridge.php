@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.48.0
+ * Version: 0.49.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.48.0';   // 0.48.0: reject client-supplied underscore (hidden) item meta
+    const VERSION  = '0.49.0';   // 0.49.0: hide the guest Join-the-Club popup in the in-app Studio designer
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -1955,6 +1955,12 @@ final class Galado_Club_Bridge {
             . 'body.galado-app .header-wrapper,'
             . 'body.galado-app #footer,'
             . 'body.galado-app .absolute-footer,'
+            // The "Join the Club" popup (#gldpj) and its minimised coin (#gldpj-min)
+            // show to guests after ~7s. Redundant in the app (the app IS the Club)
+            // and it covers the design canvas. Its JS reveals it with an inline
+            // display:flex, so !important is required to keep it hidden.
+            . 'body.galado-app #gldpj,'
+            . 'body.galado-app #gldpj-min,'
             . 'body.galado-app .woocommerce-store-notice{display:none!important}';
         if (!$is_account) {
             echo '</style>';
