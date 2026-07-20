@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.47.0
+ * Version: 0.48.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.47.0';   // 0.47.0: custom lines must name a variation on variable products
+    const VERSION  = '0.48.0';   // 0.48.0: reject client-supplied underscore (hidden) item meta
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -1402,9 +1402,19 @@ final class Galado_Club_Bridge {
                         foreach ($l['custom'] as $c) {
                             $k = sanitize_text_field((string) ($c['label'] ?? ''));
                             $v = sanitize_textarea_field((string) ($c['value'] ?? ''));
-                            if ($k !== '' && $v !== '') {
-                                $item->add_meta_data(mb_substr($k, 0, 80), mb_substr($v, 0, 500), false);
+                            if ($k === '' || $v === '') {
+                                continue;
                             }
+                            // Callers may only write VISIBLE meta. WooCommerce hides
+                            // underscore-prefixed item meta, and those keys are reserved
+                            // for server-minted fulfilment data (e.g. the Studio print
+                            // link). Letting a signed-in member set them would let them
+                            // point the admin "Download print file" button, or a customer
+                            // order-email image, at any host of their choosing.
+                            if (strpos($k, '_') === 0) {
+                                continue;
+                            }
+                            $item->add_meta_data(mb_substr($k, 0, 80), mb_substr($v, 0, 500), false);
                         }
                         $item->save();
                     }
