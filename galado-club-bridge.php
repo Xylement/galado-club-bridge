@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.50.0
+ * Version: 0.50.1
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.50.0';   // 0.50.0: move minimised coin default position to left-edge vertical-center (was bottom-left, blocked PDP sticky-bar price/CTA)
+    const VERSION  = '0.50.1';   // 0.50.1: minimised coin default -> RIGHT-edge vertical-center (left-center still sat on the left-aligned main price); X badge flipped to inner side. Clears sticky-bar price + Buy Now CTA.
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -2174,12 +2174,12 @@ final class Galado_Club_Bridge {
 #gldpj .pj-done .pj-em{font-size:40px;line-height:1;}
 #gldpj .pj-done h3{margin:10px 0 6px;font-family:'Archivo','Arial Black',Arial,sans-serif;font-weight:900;font-size:22px;color:#111;}
 #gldpj .pj-done p{margin:0 0 6px;font-size:14px;color:#4A4A4A;line-height:1.6;}
-#gldpj-min{position:fixed;left:18px;top:calc(50% - 26px);bottom:auto;z-index:999998;width:52px;height:52px;border-radius:50%;background:#fff;border:2px solid #111111;box-shadow:0 6px 18px rgba(17,17,17,.22);cursor:pointer;padding:0;align-items:center;justify-content:center;transition:transform .15s;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;}
+#gldpj-min{position:fixed;right:18px;left:auto;top:calc(50% - 26px);bottom:auto;z-index:999998;width:52px;height:52px;border-radius:50%;background:#fff;border:2px solid #111111;box-shadow:0 6px 18px rgba(17,17,17,.22);cursor:pointer;padding:0;align-items:center;justify-content:center;transition:transform .15s;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;}
 #gldpj-min:hover{transform:scale(1.08);}
 #gldpj-min img{width:30px;height:auto;display:block;margin:0 auto;}
-#gldpj-min .pj-mx{position:absolute;top:-7px;right:-7px;width:20px;height:20px;border-radius:50%;background:#111111;color:#fff;border:2px solid #fff;font:700 12px/16px Arial,sans-serif;text-align:center;box-shadow:0 2px 6px rgba(17,17,17,.3);}
+#gldpj-min .pj-mx{position:absolute;top:-7px;left:-7px;width:20px;height:20px;border-radius:50%;background:#111111;color:#fff;border:2px solid #fff;font:700 12px/16px Arial,sans-serif;text-align:center;box-shadow:0 2px 6px rgba(17,17,17,.3);}
 @media (max-width:640px){
-#gldpj-min{left:12px;top:calc(50% - 24px);bottom:auto;width:48px;height:48px;}
+#gldpj-min{right:12px;left:auto;top:calc(50% - 24px);bottom:auto;width:48px;height:48px;}
 #gldpj .pj-vis{min-height:196px;}
 #gldpj .pj-phone{width:140px;}
 #gldpj .pj-vis .pjb1{height:158px;}
