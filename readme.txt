@@ -17,22 +17,6 @@ push-to-Xylement/galado-club-bridge (WP Git Sync), NOT the zips in this folder
 (the v0.2.x zips are obsolete manual-upload relics — do not deploy them).
 
 == Changelog ==
-
-= 0.52.0 =
-* SECURITY (independent review, section 1). Coordinated with a Club-side change.
-* Welcome RM30 token is now EMAIL-BOUND: it only applies to the email address it
-  was issued to, matched against the checkout email (no login required). A
-  forwarded/pasted link no longer grants RM30 to someone else. Legacy unbound
-  tokens keep working until they expire (<=30 days); define GALADO_WELCOME_STRICT
-  true to reject them immediately once all offers have been re-minted.
-* Referral RM10 is now validated server-side against the Club (a real ref_code)
-  before it is granted or written to the order — a hand-set galado_ref cookie with
-  a made-up code grants nothing. Fails closed if the Club is unreachable.
-* The first-order discount (welcome or referral) is spent at ORDER CREATION, not
-  payment, so it can no longer be replayed across several unpaid orders.
-* Requires GALADO_CLUB_SSO_SECRET (unchanged) and the Club running v-with the
-  /api/referral/valid endpoint and email-bound mintWelcomeToken.
-
 = 0.44.0 =
 * Member (Mid-Year Sale) pricing no longer leaks to the wc/v3 REST API. The POS
   reads catalogue prices over wc/v3 (consumer-key auth counts as logged-in), so it
