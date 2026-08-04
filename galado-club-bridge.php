@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.51.0
+ * Version: 0.52.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.51.0';   // 0.51.0: popup-join accepts a whitelisted `source` (popup/blog_sidebar/blog_inline) forwarded to the Club so signups are attributable (blog acquisition card); default 'popup' unchanged.
+    const VERSION  = '0.52.0';   // 0.52.0: /app-order prices staged PWP lines from the galado-bundles server quote (iOS parity with the web engine)
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -1375,6 +1375,30 @@ final class Galado_Club_Bridge {
                 if (!count($lines) || !$email) {
                     return new WP_Error('bad_request', 'lines and billing.email required', ['status' => 400]);
                 }
+                // Staged PWP purchases (galado-bundles engine): the app sends
+                // its quote REQUESTS, never prices. Re-run the same server
+                // quote the PDP used and price matching lines from it — the
+                // engine's rules (model fit, once-per-circle, anchors, tiers,
+                // combo splits) apply to app orders byte-identically.
+                $pwp_map = [];       // "pid|vid" => [ ['unit' => x, 'qty' => n], ... ]
+                $pwp_saving = 0.0;
+                $pwp_quotes = is_array($p['pwp_quotes'] ?? null) ? $p['pwp_quotes'] : [];
+                if ($pwp_quotes && class_exists('GALADO_Bundles_App')) {
+                    foreach ($pwp_quotes as $q) {
+                        if (!is_array($q)) continue;
+                        $quote = GALADO_Bundles_App::quote($q);
+                        if (empty($quote['ok'])) {
+                            return new WP_Error('bad_request',
+                                'bundle_quote: ' . (string) ($quote['message'] ?? 'invalid'), ['status' => 400]);
+                        }
+                        foreach ((array) $quote['lines'] as $ql) {
+                            $key = (int) $ql['product_id'] . '|' . (int) $ql['variation_id'];
+                            $pwp_map[$key][] = ['unit' => (float) $ql['unit'], 'qty' => (int) $ql['qty']];
+                        }
+                        $pwp_saving += (float) ($quote['totals']['saving'] ?? 0);
+                    }
+                }
+
                 $order = wc_create_order(['status' => 'pending']);
                 if (is_wp_error($order)) {
                     return $order;
@@ -1397,6 +1421,19 @@ final class Galado_Club_Bridge {
                         return new WP_Error('bad_request', 'variation_id required for variable product ' . $pid, ['status' => 400]);
                     }
                     $item_id = $order->add_product($product, $qty);
+                    // PWP line: price it from the server quote (first unclaimed
+                    // quoted entry for this product/variation), never from the
+                    // catalogue.
+                    $pwp_key = $pid . '|' . $vid;
+                    if ($item_id && !empty($pwp_map[$pwp_key])) {
+                        $entry = array_shift($pwp_map[$pwp_key]);
+                        if ((int) $entry['qty'] === $qty) {
+                            $item = $order->get_item($item_id);
+                            $item->set_subtotal((string) ($entry['unit'] * $qty));
+                            $item->set_total((string) ($entry['unit'] * $qty));
+                            $item->save();
+                        }
+                    }
                     if ($item_id && is_array($l['custom'] ?? null)) {
                         $item = $order->get_item($item_id);
                         foreach ($l['custom'] as $c) {
@@ -1477,6 +1514,11 @@ final class Galado_Club_Bridge {
                     $order->set_customer_id($user->ID);
                 }
                 $order->add_meta_data('_galado_app_order', '1');
+                if ($pwp_saving > 0) {
+                    // Same analytics key the web cart engine records, so bundle
+                    // reporting spans both channels.
+                    $order->add_meta_data('_galado_bundle_saving', (string) round($pwp_saving, 2));
+                }
                 $order->calculate_totals();
                 $order->save();
                 return [
