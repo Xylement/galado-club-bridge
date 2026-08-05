@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.53.0
+ * Version: 0.54.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.53.0';   // 0.53.0: /app-order accumulates PWP claimed circles across quote blocks (once-per-circle spans the whole order)
+    const VERSION  = '0.54.0';   // 0.54.0: SECURITY section 1 on top of 0.53.0's app-order work - welcome token EMAIL-BOUND (verify_welcome_token matches the checkout email; forwarded links no longer grant RM30, no login needed), referral code VALIDATED vs Club /api/referral/valid before RM10 or order meta, first-order entitlement SPENT at order creation (has_used_intro + _galado_intro_discount) so it cannot replay across unpaid orders. Reuses the existing b64url(). Legacy 4-part welcome tokens honoured until expiry; GALADO_WELCOME_STRICT rejects early. Pairs with Club welcomeEmailBind + /api/referral/valid.
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -77,6 +77,10 @@ final class Galado_Club_Bridge {
         add_action('wp_footer', [__CLASS__, 'ref_cookie_script']);
         add_action('woocommerce_checkout_create_order', [__CLASS__, 'capture_referral'], 10, 1);
         add_action('woocommerce_store_api_checkout_update_order_from_request', [__CLASS__, 'capture_referral'], 10, 1);
+        // Spend the first-order entitlement at order CREATION (not payment) so it can't be
+        // replayed across several unpaid orders (security section 1c).
+        add_action('woocommerce_checkout_create_order', [__CLASS__, 'capture_first_order_discount'], 10, 1);
+        add_action('woocommerce_store_api_checkout_update_order_from_request', [__CLASS__, 'capture_first_order_discount'], 10, 1);
         // Club welcome offer: capture ?welcome=<signed token> into a 30-day cookie.
         add_action('wp_footer', [__CLASS__, 'welcome_cookie_script']);
         // iOS app webview: the auto-login link (/app-login) drops a `galado_app`
@@ -413,7 +417,9 @@ final class Galado_Club_Bridge {
             return;
         }
         $code = substr(preg_replace('/[^A-Za-z0-9]/', '', (string) wp_unslash($_COOKIE['galado_ref'])), 0, 12);
-        if ('' !== $code) {
+        // Only stamp a code the Club recognises — the order webhook credits the referrer off
+        // this meta, so an unvalidated code must never ride through.
+        if ('' !== $code && self::referral_code_valid($code)) {
             $order->update_meta_data('galado_ref', strtoupper($code));
         }
     }
@@ -428,26 +434,137 @@ final class Galado_Club_Bridge {
             return;
         }
         ?>
-<script>(function(){try{var w=new URLSearchParams(location.search).get('welcome');if(!w||!/^welcome\.[0-9]+\.[0-9]+\.[A-Za-z0-9_-]+$/.test(w))return;var e=new Date(Date.now()+2592e6).toUTCString();document.cookie='galado_welcome='+w+'; expires='+e+'; path=/; SameSite=Lax';}catch(e){}})();</script>
+<script>(function(){try{var w=new URLSearchParams(location.search).get('welcome');if(!w||!/^welcome\.[0-9]+\.(?:[A-Za-z0-9_-]+\.)?[0-9]+\.[A-Za-z0-9_-]+$/.test(w))return;var e=new Date(Date.now()+2592e6).toUTCString();document.cookie='galado_welcome='+w+'; expires='+e+'; path=/; SameSite=Lax';}catch(e){}})();</script>
 <?php
     }
 
-    /** Verify a Club-minted welcome token (welcome.<memberId>.<exp>.<base64url-hmac>). */
-    private static function verify_welcome_token($token) {
+    /**
+     * Verify a Club-minted welcome token. NEW 5-part tokens
+     * (welcome.<memberId>.<emailBind>.<exp>.<sig>) are EMAIL-BOUND: the bind must match the
+     * checkout email, so a forwarded link no longer grants RM30 to someone else — no login
+     * required, the match is against whatever email the shopper checks out with. LEGACY 4-part
+     * tokens (welcome.<memberId>.<exp>.<sig>) stay valid until they expire (<=30 days) so no
+     * already-issued offer is stranded during the migration; GALADO_WELCOME_STRICT (default
+     * off) rejects them outright once every offer in circulation has been re-minted bound.
+     * (b64url() is the pre-existing helper below — do not add another; a duplicate declaration
+     * is a parse fatal.)
+     */
+    private static function verify_welcome_token($token, $email = '') {
         $secret = self::sso_secret();
         if ('' === $secret || !$token) {
             return false;
         }
         $parts = explode('.', (string) $token);
-        if (count($parts) !== 4 || 'welcome' !== $parts[0]) {
+        $n = count($parts);
+        if ((4 !== $n && 5 !== $n) || 'welcome' !== $parts[0]) {
             return false;
         }
-        $payload = $parts[0] . '.' . $parts[1] . '.' . $parts[2];
-        $calc = rtrim(strtr(base64_encode(hash_hmac('sha256', $payload, $secret, true)), '+/', '-_'), '=');
-        if (!hash_equals($calc, $parts[3])) {
+        $sig     = $parts[$n - 1];
+        $payload = implode('.', array_slice($parts, 0, $n - 1));
+        $calc    = self::b64url(hash_hmac('sha256', $payload, $secret, true));
+        if (!hash_equals($calc, $sig)) {
             return false;
         }
-        return (int) $parts[2] >= time();
+        if ((int) $parts[$n - 2] < time()) {
+            return false; // expired
+        }
+        if (5 === $n) {
+            $email = strtolower(trim((string) $email));
+            if ('' === $email) {
+                return false; // bound token, but we don't know the shopper's email yet
+            }
+            $bind = self::b64url(hash_hmac('sha256', 'welcomebind:' . $email, $secret, true));
+            return hash_equals($parts[2], $bind);
+        }
+        return !(defined('GALADO_WELCOME_STRICT') && GALADO_WELCOME_STRICT);
+    }
+
+    /** The email this checkout resolves to: the account email when logged in, otherwise the
+     * billing email once entered (same source is_existing_customer() reads for guests). */
+    private static function current_checkout_email() {
+        if (is_user_logged_in()) {
+            $u = wp_get_current_user();
+            return $u ? strtolower((string) $u->user_email) : '';
+        }
+        return (function_exists('WC') && WC()->customer) ? strtolower((string) WC()->customer->get_billing_email()) : '';
+    }
+
+    /** Is this a real, active referral code? Asks the Club (bridge-gated, read-only) and caches
+     * the verdict briefly so cart recalculation does not hammer it. Fails CLOSED — an unknown
+     * code, an unreachable Club, or a missing secret grants no RM10 (never a leak). */
+    private static function referral_code_valid($raw) {
+        $code = strtoupper(substr(preg_replace('/[^A-Za-z0-9]/', '', (string) $raw), 0, 12));
+        if ('' === $code) {
+            return false;
+        }
+        $key    = 'galado_ref_valid_' . $code;
+        $cached = get_transient($key);
+        if (false !== $cached) {
+            return '1' === $cached;
+        }
+        $secret = self::bridge_secret();
+        if ('' === $secret) {
+            return false;
+        }
+        $res = wp_remote_get(self::club_url() . '/api/referral/valid/' . rawurlencode($code), [
+            'timeout' => 4,
+            'headers' => ['x-club-bridge-secret' => $secret],
+        ]);
+        if (is_wp_error($res) || 200 !== (int) wp_remote_retrieve_response_code($res)) {
+            return false;
+        }
+        $data  = json_decode(wp_remote_retrieve_body($res), true);
+        $valid = is_array($data) && !empty($data['valid']);
+        set_transient($key, $valid ? '1' : '0', ($valid ? 15 : 5) * MINUTE_IN_SECONDS);
+        return $valid;
+    }
+
+    /** Has this shopper already CREATED a first-order discount (welcome or referral) on any
+     * order, in any status? Closes the "many pending discounted orders" replay: the intro
+     * offer is spent at order creation, not payment, and does not return. */
+    private static function has_used_intro() {
+        if (!function_exists('wc_get_orders')) {
+            return false;
+        }
+        $args = [
+            'limit'      => 1,
+            'return'     => 'ids',
+            'status'     => array_keys(wc_get_order_statuses()),
+            'meta_query' => [['key' => '_galado_intro_discount', 'compare' => 'EXISTS']],
+        ];
+        if (is_user_logged_in()) {
+            $args['customer_id'] = get_current_user_id();
+        } else {
+            $email = self::current_checkout_email();
+            if ('' === $email) {
+                return false;
+            }
+            $args['billing_email'] = $email;
+        }
+        return !empty(wc_get_orders($args));
+    }
+
+    /** Stamp the intro discount actually applied onto the order at CREATION, so has_used_intro()
+     * sees it immediately (before payment) and a second discounted order cannot be created. */
+    public static function capture_first_order_discount($order) {
+        if (!$order || !function_exists('WC') || !WC()->cart) {
+            return;
+        }
+        $amount = 0.0;
+        $type   = '';
+        foreach (WC()->cart->get_fees() as $fee) {
+            if (0 === strpos($fee->name, 'GALADO Club welcome')) {
+                $amount = abs((float) $fee->amount);
+                $type   = 'welcome';
+            } elseif (0 === strpos($fee->name, 'Referral welcome')) {
+                $amount = abs((float) $fee->amount);
+                $type   = 'referral';
+            }
+        }
+        if ($amount > 0) {
+            $order->update_meta_data('_galado_intro_discount', $amount);
+            $order->update_meta_data('_galado_intro_type', $type);
+        }
     }
 
     /**
@@ -462,17 +579,20 @@ final class Galado_Club_Bridge {
         if ((is_admin() && !defined('DOING_AJAX')) || !function_exists('WC')) {
             return;
         }
-        if (self::is_existing_customer()) {
+        if (self::is_existing_customer() || self::has_used_intro()) {
             return;
         }
+        $email    = self::current_checkout_email();
         $subtotal = (float) $cart->get_subtotal();
         if (!empty($_COOKIE['galado_welcome'])
-            && self::verify_welcome_token(wp_unslash($_COOKIE['galado_welcome']))
+            && self::verify_welcome_token(wp_unslash($_COOKIE['galado_welcome']), $email)
             && $subtotal >= self::WELCOME30_MIN) {
             $cart->add_fee(__('GALADO Club welcome: RM30 off your first order', 'galado-club'), -1 * self::WELCOME30_AMOUNT, false);
             return;
         }
-        if (!empty($_COOKIE['galado_ref']) && $subtotal >= self::WELCOME_MIN) {
+        if (!empty($_COOKIE['galado_ref'])
+            && self::referral_code_valid(wp_unslash($_COOKIE['galado_ref']))
+            && $subtotal >= self::WELCOME_MIN) {
             $cart->add_fee(__('Referral welcome: RM10 off your first order', 'galado-club'), -1 * self::WELCOME_AMOUNT, false);
         }
     }
