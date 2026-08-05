@@ -2,13 +2,18 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.55.0
+ * Version: 0.56.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
  *   define('GALADO_CLUB_URL', 'https://club.galado.com.my');
  *   define('GALADO_CLUB_SSO_SECRET', '<same value as WP_SSO_SECRET in the Club .env>');
  *   define('GALADO_CLUB_BRIDGE_SECRET', '<same value as BRIDGE_SHARED_SECRET in the Club .env>');
+ *   define('GALADO_WALLET_SECRET', '<the wallet service's own secret - OPTIONAL, see below>');
+ * GALADO_WALLET_SECRET is the store<->wallet-service credential, kept apart from the Club bridge
+ * secret so the wallet host never holds a key that authorises it to the Club. Leave it undefined
+ * and wallet calls fall back to the bridge secret exactly as before, so defining it is what turns
+ * the split on - and it must be defined and accepted by the wallet service in the same window.
  * Then: activate plugin, visit Settings > Permalinks once (flush), and create the
  * WooCommerce webhook (topic "Order updated", delivery URL
  * https://club.galado.com.my/webhooks/woo/order, secret = WOO_WEBHOOK_SECRET).
@@ -21,7 +26,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.55.0';   // 0.55.0: SECURITY vuln-0001 - win-back RM is now RESERVED at order creation, not just debited on payment. winback_reserved() subtracts the RM already claimed by this member's live unpaid orders (pending/on-hold/processing, stamped _galado_winback_applied and not yet consumed) before the fee is offered, so two concurrent unpaid orders can no longer each spend the same balance. Read-only like has_used_intro: cancelling or failing an order releases its hold with no restore step to miss. The cart's own awaiting-payment order is skipped (a shopper returning from a failed gateway keeps their discount) and a PENDING order stops holding after WINBACK_HOLD_MIN so an abandoned checkout cannot lock the balance.
+    const VERSION  = '0.56.0';   // 0.56.0: SECURITY vuln-0002 (CRITICAL) build-only half - the outbound wallet-service credential is split off the Club bridge secret. wallet_post() now sends wallet_secret(), which returns GALADO_WALLET_SECRET when defined and otherwise falls back to the bridge secret, so DEPLOYING THIS CHANGES NOTHING. The split goes live only when GALADO_WALLET_SECRET is defined in wp-config AND the wallet service is rotated to accept it, in one window. Header name deliberately unchanged so rotation is a value swap on both ends. Inbound bridge_auth and every outbound Club call keep GALADO_CLUB_BRIDGE_SECRET. ROTATION LANDMINE: galado-pos reuses BRIDGE_SHARED_SECRET to HMAC the member QR (GLDM1.*) - rotating that value invalidates every Apple Wallet card already issued. See handover notes before scheduling.
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -262,14 +267,33 @@ final class Galado_Club_Bridge {
         return defined('GALADO_CLUB_BRIDGE_SECRET') ? GALADO_CLUB_BRIDGE_SECRET : '';
     }
 
-    /** Wallet service base (pos.galado.com.my/wallet). Same shared bridge secret as the Club. */
+    /** Wallet service base (pos.galado.com.my/wallet). */
     private static function wallet_url() {
         return defined('GALADO_WALLET_URL') ? rtrim(GALADO_WALLET_URL, '/') : 'https://pos.galado.com.my/wallet';
     }
 
-    /** Server-to-server POST to the wallet service (bridge secret). Returns decoded body or null. */
+    /**
+     * Credential for outbound calls to the wallet service (audit vuln-0002, CRITICAL).
+     *
+     * The wallet service is a THIRD trust domain, on a different host to the Club. Handing it the
+     * bridge secret meant anyone who could read that host - its env, a log line, a backup - held a
+     * key the Club accepts as "this is the store", which is why the audit ranked this first.
+     *
+     * Falls back to the bridge secret while GALADO_WALLET_SECRET is undefined, so shipping this is
+     * a no-op and the split turns on only when the constant is defined and the wallet service is
+     * rotated to match, in one window. The header name is unchanged so that rotation is a value
+     * swap on both ends rather than a protocol change.
+     */
+    private static function wallet_secret() {
+        if (defined('GALADO_WALLET_SECRET') && '' !== GALADO_WALLET_SECRET) {
+            return GALADO_WALLET_SECRET;
+        }
+        return self::bridge_secret();
+    }
+
+    /** Server-to-server POST to the wallet service. Returns decoded body or null. */
     private static function wallet_post($path, $body) {
-        $secret = self::bridge_secret();
+        $secret = self::wallet_secret();
         if ('' === $secret) {
             return null;
         }
