@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.56.1
+ * Version: 0.56.2
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,14 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.56.1';   // 0.56.0: CART TIER METER for signed-in members - ports the iOS cart projection card (App/Features/Shop/CartView.swift) to the web basket. Shows where THIS order lands them on the ladder (Silver 0 / Gold 500 / Diamond 1000 / Black 2000, mirroring TIER_MINS in the Club), lifetime fill under the order's reach, and an 'i' at the end of the bar opening the full perk list per tier (hover, click or keyboard; Escape closes). Data comes from a new session-scoped GET /my-tier which takes NO email and reads the logged-in user, so it can only report on whoever is signed in. Fetched AFTER paint, never inline, so the Club call cannot slow the basket down. ADMIN-ONLY until the galado_tier_meter_public filter returns true.
+    const VERSION  = '0.56.2';
+    // 0.56.2: owner feedback on the live basket. (a) THE BASKET READ AS RM0 even with items in it:
+    //   WooCommerce does not boot the cart on a REST request, so WC()->cart was empty - my_tier now calls
+    //   wc_load_cart(), and returns null rather than 0 when it still cannot read one, so the page falls back
+    //   to the figure the cart itself rendered instead of telling a member their basket adds nothing.
+    //   (b) The 'i' rendered as a serif CAPITAL I in an oval: the theme uppercases button text and sets a
+    //   min-width, both now overridden, and the button is smaller and quieter. (c) The foot line was jargon
+    //   ('RM2,055.00 so far, plus RM0.00 from this order') and is now a sentence.
     // 0.56.1: tier meter polish after looking at it rendered - threshold labels now sit at their own
     // position on the track so each lines up with its dot (they were evenly spaced and drifting off by
     // a few percent); the perk popover opens DOWNWARD because the meter sits at the top of the basket
@@ -2623,7 +2630,17 @@ if(st&&st.snooze&&Date.now()<st.snooze){showChip()}else{setTimeout(openAll,7000)
             // rather than showing a plausible but invented position.
             return ['ok' => false];
         }
-        $total = 0.0;
+        // WooCommerce does not boot the cart on a REST request, so WC()->cart is empty here
+        // unless it is asked for. Without this the basket always reported RM0.
+        if (function_exists('WC')) {
+            if (!WC()->cart && function_exists('wc_load_cart')) {
+                wc_load_cart();
+            }
+        }
+        // null, not 0: "could not read the basket" and "the basket is empty" are different
+        // answers, and the page falls back to its own figure for the first rather than
+        // telling the member their basket adds nothing.
+        $total = null;
         if (function_exists('WC') && WC()->cart) {
             $total = (float) WC()->cart->get_total('edit');
         }
@@ -2649,9 +2666,13 @@ if(st&&st.snooze&&Date.now()<st.snooze){showChip()}else{setTimeout(openAll,7000)
         if (!apply_filters('galado_tier_meter_public', false) && !current_user_can('manage_woocommerce')) {
             return;
         }
+        // This hook runs on the cart page, where the cart is genuinely loaded, so the basket
+        // total taken here is authoritative for the first paint.
+        $cart_total = (function_exists('WC') && WC()->cart) ? (float) WC()->cart->get_total('edit') : 0.0;
         $cfg = [
             'rest'   => esc_url_raw(rest_url('galado-club/v1/my-tier')),
             'nonce'  => wp_create_nonce('wp_rest'),
+            'order'  => $cart_total,
             'ladder' => self::tier_ladder(),
             'perks'  => self::tier_perks(),
         ];
@@ -2694,9 +2715,14 @@ if(st&&st.snooze&&Date.now()<st.snooze){showChip()}else{setTimeout(openAll,7000)
 .gld-tier__lab.is-here b{font-weight:800;color:#111}
 .gld-tier__lab span{font-size:10px;color:#9A9AA2;font-variant-numeric:tabular-nums}
 .gld-tier__foot{margin:10px 0 0;font-size:11.5px;color:#6B6B73;font-variant-numeric:tabular-nums}
-.gld-tier__info{flex:0 0 auto;margin-top:-9px;width:26px;height:26px;padding:0;border:1px solid #D9D9DD;border-radius:50%;background:#fff;color:#6B6B73;
-  font:700 13px/1 Georgia,serif;cursor:pointer;transition:border-color .2s ease,color .2s ease,background .2s ease}
-.gld-tier__info:hover,.gld-tier__info:focus-visible{border-color:#111;color:#111;background:#F6F6F7}
+/* The theme uppercases button text and gives buttons a min-width, which turned this into a
+   serif capital I in an oval. Every one of those is overridden explicitly. */
+.gld-tier__info{flex:0 0 22px;box-sizing:border-box;margin-top:-7px;width:22px;height:22px;min-width:22px;min-height:22px;
+  padding:0;border:1px solid #E2E2E6;border-radius:50%;background:#fff;color:#A8A8B0;
+  font-family:inherit;font-size:12px;font-weight:600;font-style:italic;line-height:20px;letter-spacing:0;
+  text-transform:none;text-align:center;cursor:pointer;box-shadow:none;
+  transition:border-color .2s ease,color .2s ease}
+.gld-tier__info:hover,.gld-tier__info:focus-visible{border-color:#B4B4BC;color:#57575E;background:#fff}
 .gld-tier__info:focus-visible{outline:2px solid #E4002B;outline-offset:2px}
 /* Opens DOWNWARD: the meter sits at the top of the basket, so there is never room above it.
    Capped and scrollable so a long ladder cannot run off a short phone screen. */
@@ -2787,7 +2813,10 @@ window.GLD_TIER = <?php echo wp_json_encode($cfg); ?>;
   }
 
   function paint(d) {
-    var life = +d.lifetime || 0, order = +d.order || 0, projected = life + order;
+    // A null basket means the request could not read it, not that it is empty: keep the
+    // figure the cart page itself rendered with.
+    var order = (d.order === null || d.order === undefined) ? (+CFG.order || 0) : (+d.order || 0);
+    var life = +d.lifetime || 0, projected = life + order;
     var now = tierAt(life), next = null, reachedTier = tierAt(projected);
     ladder.forEach(function (t) { if (next === null && projected < t.min) next = t; });
 
@@ -2821,8 +2850,9 @@ window.GLD_TIER = <?php echo wp_json_encode($cfg); ?>;
       if (grp) grp.classList.toggle('is-here', t.key === reachedTier.key);
     });
 
-    box.querySelector('.gld-tier__foot').textContent =
-      rm(life, 2) + ' so far, plus ' + rm(order, 2) + ' from this order.';
+    box.querySelector('.gld-tier__foot').textContent = order > 0
+      ? "You've spent " + rm(life, 2) + ' with us so far. This basket adds ' + rm(order, 2) + '.'
+      : "You've spent " + rm(life, 2) + ' with us so far.';
     box.hidden = false;
   }
 
