@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.54.0
+ * Version: 0.55.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.54.0';   // 0.54.0: SECURITY section 1 on top of 0.53.0's app-order work - welcome token EMAIL-BOUND (verify_welcome_token matches the checkout email; forwarded links no longer grant RM30, no login needed), referral code VALIDATED vs Club /api/referral/valid before RM10 or order meta, first-order entitlement SPENT at order creation (has_used_intro + _galado_intro_discount) so it cannot replay across unpaid orders. Reuses the existing b64url(). Legacy 4-part welcome tokens honoured until expiry; GALADO_WELCOME_STRICT rejects early. Pairs with Club welcomeEmailBind + /api/referral/valid.
+    const VERSION  = '0.55.0';   // 0.55.0: SECURITY vuln-0001 - win-back RM is now RESERVED at order creation, not just debited on payment. winback_reserved() subtracts the RM already claimed by this member's live unpaid orders (pending/on-hold/processing, stamped _galado_winback_applied and not yet consumed) before the fee is offered, so two concurrent unpaid orders can no longer each spend the same balance. Read-only like has_used_intro: cancelling or failing an order releases its hold with no restore step to miss. The cart's own awaiting-payment order is skipped (a shopper returning from a failed gateway keeps their discount) and a PENDING order stops holding after WINBACK_HOLD_MIN so an abandoned checkout cannot lock the balance.
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -31,6 +31,7 @@ final class Galado_Club_Bridge {
     // pushed by the Club; consumed on order payment. Protects margin via the min-cart ratio.
     const WINBACK_MIN  = 50; // RM min cart subtotal per WINBACK_STEP of discount
     const WINBACK_STEP = 10; // RM discount unlocked per WINBACK_MIN of cart
+    const WINBACK_HOLD_MIN = 60; // minutes an unpaid PENDING order keeps holding its claim
 
     // ── Mid-Year Member Sale (Thu 16 – Sun 19 Jul 2026, MYT) — SPEC-MIDYEAR-SALE-STORE.md ──
     // Members (= any logged-in customer; every store account is Club-provisioned since the
@@ -615,6 +616,12 @@ final class Galado_Club_Bridge {
         if ($expires && time() > $expires) {
             return;
         }
+        // The balance is only debited on payment, so RM already claimed by a live unpaid order
+        // has to come off the top or the same RM can be spent again on a second order.
+        $avail = max(0.0, $avail - self::winback_reserved($uid));
+        if ($avail <= 0) {
+            return;
+        }
         $subtotal = (float) $cart->get_subtotal();
         $by_cart  = floor($subtotal / self::WINBACK_MIN) * self::WINBACK_STEP;
         $discount = min($avail, $by_cart);
@@ -638,6 +645,46 @@ final class Galado_Club_Bridge {
         if ($applied > 0) {
             $order->update_meta_data('_galado_winback_applied', $applied);
         }
+    }
+
+    /**
+     * RM this member has already claimed on live orders that have not paid yet (audit vuln-0001).
+     * consume_winback only debits the balance on payment, so two unpaid orders could each apply
+     * the same RM and both then pay. Mirrors has_used_intro(): nothing is written, so a cancelled
+     * or failed order releases its hold by itself and no balance can be lost to a missed restore.
+     */
+    private static function winback_reserved($uid) {
+        if (!$uid || !function_exists('wc_get_orders')) {
+            return 0.0;
+        }
+        // The order this very cart is already paying for must not block its own cart: the shopper
+        // who bounces off the payment page and comes back would otherwise watch their RM vanish.
+        $mine = (WC()->session) ? (int) WC()->session->get('order_awaiting_payment') : 0;
+        // Deliberately no meta_query: this has to behave identically on legacy post storage and on
+        // HPOS, and a silent empty result would fail OPEN (no hold, bug still live). One customer's
+        // live orders are a handful, so the claim stamp is read off each one below instead.
+        $orders = wc_get_orders([
+            'customer_id' => $uid,
+            'limit'       => 20,
+            'status'      => ['wc-pending', 'wc-on-hold', 'wc-processing'],
+        ]);
+        $held = 0.0;
+        foreach ($orders as $order) {
+            if ($order->get_id() === $mine || $order->get_meta('_galado_winback_consumed')) {
+                continue;
+            }
+            // An abandoned checkout must not lock the balance for good, so a PENDING order lets go
+            // after WINBACK_HOLD_MIN (Woo's own unpaid-order window). on-hold and processing are
+            // real money in flight - bank transfer, gateway settling - and hold until consumed.
+            if ('pending' === $order->get_status()) {
+                $created = $order->get_date_created();
+                if ($created && (time() - $created->getTimestamp()) > self::WINBACK_HOLD_MIN * MINUTE_IN_SECONDS) {
+                    continue;
+                }
+            }
+            $held += (float) $order->get_meta('_galado_winback_applied');
+        }
+        return $held;
     }
 
     /** On payment, subtract the applied win-back RM from the member's balance. Idempotent per order. */
