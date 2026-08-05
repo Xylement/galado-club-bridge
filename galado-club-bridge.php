@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.55.0
+ * Version: 0.56.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.55.0';   // 0.55.0: SECURITY vuln-0001 - win-back RM is now RESERVED at order creation, not just debited on payment. winback_reserved() subtracts the RM already claimed by this member's live unpaid orders (pending/on-hold/processing, stamped _galado_winback_applied and not yet consumed) before the fee is offered, so two concurrent unpaid orders can no longer each spend the same balance. Read-only like has_used_intro: cancelling or failing an order releases its hold with no restore step to miss. The cart's own awaiting-payment order is skipped (a shopper returning from a failed gateway keeps their discount) and a PENDING order stops holding after WINBACK_HOLD_MIN so an abandoned checkout cannot lock the balance.
+    const VERSION  = '0.56.0';   // 0.56.0: CART TIER METER for signed-in members - ports the iOS cart projection card (App/Features/Shop/CartView.swift) to the web basket. Shows where THIS order lands them on the ladder (Silver 0 / Gold 500 / Diamond 1000 / Black 2000, mirroring TIER_MINS in the Club), lifetime fill under the order's reach, and an 'i' at the end of the bar opening the full perk list per tier (hover, click or keyboard; Escape closes). Data comes from a new session-scoped GET /my-tier which takes NO email and reads the logged-in user, so it can only report on whoever is signed in. Fetched AFTER paint, never inline, so the Club call cannot slow the basket down. ADMIN-ONLY until the galado_tier_meter_public filter returns true.
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -101,6 +101,8 @@ final class Galado_Club_Bridge {
         // Consume the applied win-back RM once the order is paid (idempotent per order).
         add_action('woocommerce_order_status_processing', [__CLASS__, 'consume_winback'], 20, 1);
         add_action('woocommerce_order_status_completed', [__CLASS__, 'consume_winback'], 20, 1);
+        // Cart-page tier meter for signed-in members (ports the iOS cart projection card).
+        add_action('woocommerce_before_cart', [__CLASS__, 'render_tier_meter'], 5);
         // POS (pos.galado.com.my) orders carry _pos_order meta: the sale happened at the
         // counter, so suppress WooCommerce CUSTOMER emails and keep the order out of
         // Klaviyo (flows like post-purchase would otherwise fire on walk-in sales).
@@ -1139,6 +1141,13 @@ final class Galado_Club_Bridge {
             'methods'             => 'POST',
             'permission_callback' => [__CLASS__, 'bridge_auth'],
             'callback'            => [__CLASS__, 'wallet_add_link_batch'],
+        ]);
+        // The signed-in member's own tier standing, for the cart meter. Session-scoped:
+        // it takes no email, so it can only ever report on whoever is logged in.
+        register_rest_route('galado-club/v1', '/my-tier', [
+            'methods'             => 'GET',
+            'permission_callback' => function () { return is_user_logged_in(); },
+            'callback'            => [__CLASS__, 'my_tier'],
         ]);
         register_rest_route('galado-club/v1', '/tier', [
             'methods'             => 'POST',
@@ -2544,6 +2553,295 @@ if(st&&st.snooze&&Date.now()<st.snooze){showChip()}else{setTimeout(openAll,7000)
 </script>
 <?php
     }
+
+    /**
+     * Tier ladder, thresholds in RM of lifetime spend. Mirrors TIER_MINS in the Club
+     * (web/src/lib/tiers.ts) and the iOS cart card, which is the design this follows.
+     */
+    private static function tier_ladder() {
+        return [
+            ['key' => 'silver',  'name' => 'Silver',        'min' => 0,    'colour' => '#9AA7B5', 'off' => 0],
+            ['key' => 'gold',    'name' => 'Gold',          'min' => 500,  'colour' => '#E9A93D', 'off' => 5],
+            ['key' => 'diamond', 'name' => 'Diamond',       'min' => 1000, 'colour' => '#6FC7E8', 'off' => 10],
+            ['key' => 'black',   'name' => 'GALADO Black',  'min' => 2000, 'colour' => '#2E2630', 'off' => 15],
+        ];
+    }
+
+    /** Perks unlocked AT each tier. Everything below carries upward (see 'inherits'). */
+    private static function tier_perks() {
+        return [
+            'silver' => [
+                'inherits' => '',
+                'items'    => [
+                    'Free shipping across Malaysia, every order',
+                    '6-month warranty on every case',
+                    'Buddy locker, shop and dressing room',
+                    'Daily Arcade, quizzes and G-Coin games',
+                    'Collector titles, badges and Mystery Boxes',
+                ],
+            ],
+            'gold' => [
+                'inherits' => 'Everything in Silver',
+                'items'    => ['24-hour early access to new drops'],
+            ],
+            'diamond' => [
+                'inherits' => 'Everything in Silver and Gold',
+                'items'    => ['48-hour early access to new drops'],
+            ],
+            'black' => [
+                'inherits' => 'Everything in Silver, Gold and Diamond',
+                'items'    => [
+                    '72-hour early access to new drops',
+                    '12-month warranty, double the standard 6 months',
+                    'Dark mode across the whole Club',
+                ],
+            ],
+        ];
+    }
+
+    /**
+     * The member's own tier standing. Session-scoped on purpose: it reads the logged-in
+     * user and takes no email, so one member can never ask for another's figures.
+     *
+     * Deliberately a separate request rather than part of the cart render: the Club call
+     * can be slow, and the cart page must not wait on it to paint.
+     */
+    public static function my_tier() {
+        $user = wp_get_current_user();
+        if (!$user || !$user->ID) {
+            return ['ok' => false];
+        }
+        $summary = self::fetch_summary($user->user_email, $user->ID);
+        if (!is_array($summary) || !isset($summary['lifetimeSpend'])) {
+            // No lifetime figure means no honest bar to draw, so the block stays hidden
+            // rather than showing a plausible but invented position.
+            return ['ok' => false];
+        }
+        $total = 0.0;
+        if (function_exists('WC') && WC()->cart) {
+            $total = (float) WC()->cart->get_total('edit');
+        }
+        return [
+            'ok'       => true,
+            'tier'     => (string) ($summary['tier'] ?? 'silver'),
+            'lifetime' => (float) $summary['lifetimeSpend'],
+            'order'    => $total,
+        ];
+    }
+
+    /**
+     * Cart-page tier meter for signed-in members: where this order lands them on the
+     * ladder. Ports the iOS cart projection card (App/Features/Shop/CartView.swift).
+     *
+     * Ships to administrators only until `galado_tier_meter_public` is flipped to true,
+     * so it can be reviewed on the live cart before every member sees it.
+     */
+    public static function render_tier_meter() {
+        if (!is_user_logged_in()) {
+            return;
+        }
+        if (!apply_filters('galado_tier_meter_public', false) && !current_user_can('manage_woocommerce')) {
+            return;
+        }
+        $cfg = [
+            'rest'   => esc_url_raw(rest_url('galado-club/v1/my-tier')),
+            'nonce'  => wp_create_nonce('wp_rest'),
+            'ladder' => self::tier_ladder(),
+            'perks'  => self::tier_perks(),
+        ];
+        ?>
+<div id="gld-tier" class="gld-tier" hidden>
+  <div class="gld-tier__head">
+    <span class="gld-tier__mark" aria-hidden="true"></span>
+    <p class="gld-tier__headline"></p>
+  </div>
+  <div class="gld-tier__barrow">
+    <div class="gld-tier__track"><div class="gld-tier__dots"></div></div>
+    <button type="button" class="gld-tier__info" aria-expanded="false" aria-controls="gld-tier-perks">
+      <span aria-hidden="true">i</span><span class="screen-reader-text">What each tier gets you</span>
+    </button>
+  </div>
+  <div class="gld-tier__labels"></div>
+  <p class="gld-tier__foot"></p>
+  <div class="gld-tier__perks" id="gld-tier-perks" hidden></div>
+</div>
+<style>
+.gld-tier{position:relative;margin:0 0 24px;padding:16px 18px 14px;border:1px solid #E7E7E9;border-radius:14px;background:#fff;color:#111}
+.gld-tier__head{display:flex;align-items:flex-start;gap:8px;margin-bottom:12px}
+.gld-tier__mark{flex:0 0 auto;width:16px;height:16px;margin-top:2px;border-radius:50%;background:#E4002B}
+.gld-tier__headline{margin:0;font-size:14.5px;line-height:1.35;font-weight:700;letter-spacing:-.01em}
+.gld-tier__barrow{display:flex;align-items:center;gap:12px}
+.gld-tier__track{position:relative;flex:1 1 auto;height:8px;border-radius:99px;background:#EDEDEF}
+.gld-tier__fill{position:absolute;top:0;left:0;height:8px;border-radius:99px;width:0;transition:width .9s cubic-bezier(.16,1,.3,1)}
+.gld-tier__fill--order{background:rgba(228,0,43,.34)}
+.gld-tier__dots{position:absolute;inset:0}
+.gld-tier__dot{position:absolute;top:50%;width:12px;height:12px;margin:-6px 0 0 -6px;border-radius:50%;background:#EDEDEF;box-shadow:0 0 0 2px #fff;transform:scale(.82);transition:background .4s ease,transform .4s ease}
+.gld-tier__dot.is-on{transform:scale(1)}
+.gld-tier__labels{display:flex;justify-content:space-between;margin:10px 42px 0 0}
+.gld-tier__lab{display:flex;flex-direction:column;gap:1px;text-align:center;flex:0 0 auto}
+.gld-tier__lab:first-child{text-align:left}
+.gld-tier__lab:last-child{text-align:right}
+.gld-tier__lab b{font-size:11.5px;font-weight:600;color:#6B6B73;letter-spacing:-.01em}
+.gld-tier__lab.is-here b{font-weight:800;color:#111}
+.gld-tier__lab span{font-size:10px;color:#9A9AA2;font-variant-numeric:tabular-nums}
+.gld-tier__foot{margin:10px 0 0;font-size:11.5px;color:#6B6B73;font-variant-numeric:tabular-nums}
+.gld-tier__info{flex:0 0 auto;width:26px;height:26px;padding:0;border:1px solid #D9D9DD;border-radius:50%;background:#fff;color:#6B6B73;
+  font:700 13px/1 Georgia,serif;cursor:pointer;transition:border-color .2s ease,color .2s ease,background .2s ease}
+.gld-tier__info:hover,.gld-tier__info:focus-visible{border-color:#111;color:#111;background:#F6F6F7}
+.gld-tier__info:focus-visible{outline:2px solid #E4002B;outline-offset:2px}
+.gld-tier__perks{position:absolute;right:14px;bottom:calc(100% - 8px);z-index:30;width:min(310px,calc(100vw - 48px));
+  padding:14px 16px;border:1px solid #E7E7E9;border-radius:14px;background:#fff;box-shadow:0 18px 40px rgba(17,17,17,.16);text-align:left}
+.gld-tier__perks[hidden]{display:none}
+.gld-tier__ptitle{margin:0 0 10px;font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#9A9AA2}
+.gld-tier__grp{padding:9px 0;border-top:1px solid #F0F0F2}
+.gld-tier__grp:first-of-type{border-top:0;padding-top:0}
+.gld-tier__ghead{display:flex;align-items:center;gap:7px;margin-bottom:5px}
+.gld-tier__gdot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
+.gld-tier__gname{font-size:12.5px;font-weight:700;color:#111;letter-spacing:-.01em}
+.gld-tier__goff{margin-left:auto;font-size:10px;font-weight:700;padding:2px 7px;border-radius:99px;background:#F2F2F4;color:#4A4A52;white-space:nowrap}
+.gld-tier__grp.is-here .gld-tier__goff{background:#E4002B;color:#fff}
+.gld-tier__gin{margin:0 0 4px;font-size:11px;color:#9A9AA2;font-style:italic}
+.gld-tier__perks ul{margin:0;padding:0;list-style:none}
+.gld-tier__perks li{position:relative;padding-left:13px;margin:0 0 3px;font-size:11.5px;line-height:1.45;color:#4A4A52}
+.gld-tier__perks li:before{content:"";position:absolute;left:0;top:7px;width:4px;height:4px;border-radius:50%;background:#C9C9CF}
+@media (max-width:600px){
+  .gld-tier{padding:14px 15px 12px}
+  .gld-tier__perks{right:0;left:0;width:auto}
+}
+@media (prefers-reduced-motion:reduce){
+  .gld-tier__fill,.gld-tier__dot{transition:none}
+}
+</style>
+<script>
+window.GLD_TIER = <?php echo wp_json_encode($cfg); ?>;
+(function () {
+  var CFG = window.GLD_TIER || {}, box = document.getElementById('gld-tier');
+  if (!box || !CFG.rest) return;
+  var ladder = CFG.ladder || [], cap = ladder.length ? ladder[ladder.length - 1].min : 1;
+
+  function rm(n, dp) { return 'RM' + (+n || 0).toFixed(dp || 0); }
+  function tierAt(spend) { var t = ladder[0]; ladder.forEach(function (x) { if (spend >= x.min) t = x; }); return t; }
+
+  // Built once; only the numbers move afterwards.
+  function scaffold() {
+    var track = box.querySelector('.gld-tier__track'), dots = box.querySelector('.gld-tier__dots');
+    var labs = box.querySelector('.gld-tier__labels');
+    var order = document.createElement('div'); order.className = 'gld-tier__fill gld-tier__fill--order';
+    var life = document.createElement('div'); life.className = 'gld-tier__fill gld-tier__fill--life';
+    track.insertBefore(order, dots); track.insertBefore(life, dots);
+    ladder.forEach(function (t, i) {
+      if (i > 0) {
+        var d = document.createElement('span');
+        d.className = 'gld-tier__dot'; d.dataset.key = t.key;
+        d.style.left = (t.min / cap * 100) + '%';
+        dots.appendChild(d);
+      }
+      var l = document.createElement('span');
+      l.className = 'gld-tier__lab'; l.dataset.key = t.key;
+      l.innerHTML = '<b></b><span></span>';
+      l.querySelector('b').textContent = t.name === 'GALADO Black' ? 'Black' : t.name;
+      l.querySelector('span').textContent = t.min === 0 ? 'Join' : rm(t.min);
+      labs.appendChild(l);
+    });
+    buildPerks();
+  }
+
+  function buildPerks() {
+    var host = box.querySelector('.gld-tier__perks'), p = CFG.perks || {};
+    var h = '<p class="gld-tier__ptitle">What each tier gets you</p>';
+    ladder.forEach(function (t) {
+      var d = p[t.key] || { items: [], inherits: '' };
+      h += '<div class="gld-tier__grp" data-key="' + t.key + '">'
+        + '<div class="gld-tier__ghead"><span class="gld-tier__gdot" style="background:' + t.colour + '"></span>'
+        + '<span class="gld-tier__gname"></span>'
+        + '<span class="gld-tier__goff">' + (t.off ? t.off + '% off' : 'Member') + '</span></div>';
+      if (d.inherits) h += '<p class="gld-tier__gin"></p>';
+      h += '<ul></ul></div>';
+      host.insertAdjacentHTML('beforeend', h); h = '';
+      var grp = host.lastElementChild;
+      grp.querySelector('.gld-tier__gname').textContent = t.name;
+      if (d.inherits) grp.querySelector('.gld-tier__gin').textContent = d.inherits;
+      var ul = grp.querySelector('ul');
+      (d.items || []).forEach(function (item) {
+        var li = document.createElement('li'); li.textContent = item; ul.appendChild(li);
+      });
+    });
+    if (!host.firstChild) host.innerHTML = '';
+  }
+
+  function paint(d) {
+    var life = +d.lifetime || 0, order = +d.order || 0, projected = life + order;
+    var now = tierAt(life), next = null, reachedTier = tierAt(projected);
+    ladder.forEach(function (t) { if (next === null && projected < t.min) next = t; });
+
+    var head = box.querySelector('.gld-tier__headline'), mark = box.querySelector('.gld-tier__mark');
+    if (reachedTier.min > now.min) {
+      head.textContent = 'This order takes you to ' + reachedTier.name + '.';
+      mark.style.background = reachedTier.colour;
+    } else if (next) {
+      head.textContent = rm(Math.ceil(next.min - projected)) + ' more after this order to reach ' + next.name + '.';
+      mark.style.background = '#E4002B';
+    } else {
+      head.textContent = "You're at GALADO Black, the top of the Club.";
+      mark.style.background = reachedTier.colour;
+    }
+
+    box.querySelector('.gld-tier__fill--order').style.width = Math.min(projected / cap, 1) * 100 + '%';
+    var lf = box.querySelector('.gld-tier__fill--life');
+    lf.style.width = Math.min(life / cap, 1) * 100 + '%';
+    lf.style.background = now.colour;
+
+    ladder.forEach(function (t) {
+      var dot = box.querySelector('.gld-tier__dot[data-key="' + t.key + '"]');
+      if (dot) {
+        var on = projected >= t.min;
+        dot.classList.toggle('is-on', on);
+        dot.style.background = on ? t.colour : '#EDEDEF';
+      }
+      var lab = box.querySelector('.gld-tier__lab[data-key="' + t.key + '"]');
+      if (lab) lab.classList.toggle('is-here', t.key === reachedTier.key);
+      var grp = box.querySelector('.gld-tier__grp[data-key="' + t.key + '"]');
+      if (grp) grp.classList.toggle('is-here', t.key === reachedTier.key);
+    });
+
+    box.querySelector('.gld-tier__foot').textContent =
+      rm(life, 2) + ' so far, plus ' + rm(order, 2) + ' from this order.';
+    box.hidden = false;
+  }
+
+  // The "i": hover for pointers, click or keyboard for everyone, Escape to close.
+  var btn = box.querySelector('.gld-tier__info'), pop = box.querySelector('.gld-tier__perks'), pinned = false;
+  function show(on) { pop.hidden = !on; btn.setAttribute('aria-expanded', on ? 'true' : 'false'); }
+  btn.addEventListener('click', function () { pinned = !pinned; show(pinned); });
+  btn.addEventListener('mouseenter', function () { show(true); });
+  btn.addEventListener('focus', function () { show(true); });
+  btn.addEventListener('mouseleave', function () { if (!pinned) show(false); });
+  btn.addEventListener('blur', function () { if (!pinned) show(false); });
+  pop.addEventListener('mouseenter', function () { show(true); });
+  pop.addEventListener('mouseleave', function () { if (!pinned) show(false); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && pinned) { pinned = false; show(false); btn.focus(); }
+  });
+  document.addEventListener('click', function (e) {
+    if (pinned && !box.contains(e.target)) { pinned = false; show(false); }
+  });
+
+  function load() {
+    fetch(CFG.rest, { credentials: 'same-origin', headers: { 'X-WP-Nonce': CFG.nonce } })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { if (d && d.ok) { paint(d); } else { box.hidden = true; } })
+      .catch(function () { box.hidden = true; });
+  }
+
+  scaffold();
+  load();
+  // Quantity changes and coupons redraw the totals; the projection follows them.
+  if (window.jQuery) { window.jQuery(document.body).on('updated_cart_totals', load); }
+})();
+</script>
+        <?php
+    }
+
 }
 
 Galado_Club_Bridge::init();
