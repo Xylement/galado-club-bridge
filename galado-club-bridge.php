@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.56.0
+ * Version: 0.56.1
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,13 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.56.0';   // 0.56.0: CART TIER METER for signed-in members - ports the iOS cart projection card (App/Features/Shop/CartView.swift) to the web basket. Shows where THIS order lands them on the ladder (Silver 0 / Gold 500 / Diamond 1000 / Black 2000, mirroring TIER_MINS in the Club), lifetime fill under the order's reach, and an 'i' at the end of the bar opening the full perk list per tier (hover, click or keyboard; Escape closes). Data comes from a new session-scoped GET /my-tier which takes NO email and reads the logged-in user, so it can only report on whoever is signed in. Fetched AFTER paint, never inline, so the Club call cannot slow the basket down. ADMIN-ONLY until the galado_tier_meter_public filter returns true.
+    const VERSION  = '0.56.1';   // 0.56.0: CART TIER METER for signed-in members - ports the iOS cart projection card (App/Features/Shop/CartView.swift) to the web basket. Shows where THIS order lands them on the ladder (Silver 0 / Gold 500 / Diamond 1000 / Black 2000, mirroring TIER_MINS in the Club), lifetime fill under the order's reach, and an 'i' at the end of the bar opening the full perk list per tier (hover, click or keyboard; Escape closes). Data comes from a new session-scoped GET /my-tier which takes NO email and reads the logged-in user, so it can only report on whoever is signed in. Fetched AFTER paint, never inline, so the Club call cannot slow the basket down. ADMIN-ONLY until the galado_tier_meter_public filter returns true.
+    // 0.56.1: tier meter polish after looking at it rendered - threshold labels now sit at their own
+    // position on the track so each lines up with its dot (they were evenly spaced and drifting off by
+    // a few percent); the perk popover opens DOWNWARD because the meter sits at the top of the basket
+    // and there is never room above (it was running off the top of the screen on a phone), capped and
+    // scrollable so a long ladder cannot overflow; this order's slice of the bar reads at 0.55 alpha
+    // since it is often thin; money over a thousand carries separators.
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -2656,12 +2662,14 @@ if(st&&st.snooze&&Date.now()<st.snooze){showChip()}else{setTimeout(openAll,7000)
     <p class="gld-tier__headline"></p>
   </div>
   <div class="gld-tier__barrow">
-    <div class="gld-tier__track"><div class="gld-tier__dots"></div></div>
+    <div class="gld-tier__meter">
+      <div class="gld-tier__track"><div class="gld-tier__dots"></div></div>
+      <div class="gld-tier__labels"></div>
+    </div>
     <button type="button" class="gld-tier__info" aria-expanded="false" aria-controls="gld-tier-perks">
       <span aria-hidden="true">i</span><span class="screen-reader-text">What each tier gets you</span>
     </button>
   </div>
-  <div class="gld-tier__labels"></div>
   <p class="gld-tier__foot"></p>
   <div class="gld-tier__perks" id="gld-tier-perks" hidden></div>
 </div>
@@ -2670,26 +2678,30 @@ if(st&&st.snooze&&Date.now()<st.snooze){showChip()}else{setTimeout(openAll,7000)
 .gld-tier__head{display:flex;align-items:flex-start;gap:8px;margin-bottom:12px}
 .gld-tier__mark{flex:0 0 auto;width:16px;height:16px;margin-top:2px;border-radius:50%;background:#E4002B}
 .gld-tier__headline{margin:0;font-size:14.5px;line-height:1.35;font-weight:700;letter-spacing:-.01em}
-.gld-tier__barrow{display:flex;align-items:center;gap:12px}
-.gld-tier__track{position:relative;flex:1 1 auto;height:8px;border-radius:99px;background:#EDEDEF}
+.gld-tier__barrow{display:flex;align-items:flex-start;gap:12px}
+.gld-tier__meter{flex:1 1 auto;min-width:0}
+.gld-tier__track{position:relative;height:8px;border-radius:99px;background:#EDEDEF}
 .gld-tier__fill{position:absolute;top:0;left:0;height:8px;border-radius:99px;width:0;transition:width .9s cubic-bezier(.16,1,.3,1)}
-.gld-tier__fill--order{background:rgba(228,0,43,.34)}
+.gld-tier__fill--order{background:rgba(228,0,43,.55)}
 .gld-tier__dots{position:absolute;inset:0}
 .gld-tier__dot{position:absolute;top:50%;width:12px;height:12px;margin:-6px 0 0 -6px;border-radius:50%;background:#EDEDEF;box-shadow:0 0 0 2px #fff;transform:scale(.82);transition:background .4s ease,transform .4s ease}
 .gld-tier__dot.is-on{transform:scale(1)}
-.gld-tier__labels{display:flex;justify-content:space-between;margin:10px 42px 0 0}
-.gld-tier__lab{display:flex;flex-direction:column;gap:1px;text-align:center;flex:0 0 auto}
-.gld-tier__lab:first-child{text-align:left}
-.gld-tier__lab:last-child{text-align:right}
+.gld-tier__labels{position:relative;height:29px;margin:10px 0 0}
+.gld-tier__lab{position:absolute;top:0;display:flex;flex-direction:column;gap:1px;text-align:center;transform:translateX(-50%);white-space:nowrap}
+.gld-tier__lab:first-child{transform:none;text-align:left}
+.gld-tier__lab:last-child{transform:translateX(-100%);text-align:right}
 .gld-tier__lab b{font-size:11.5px;font-weight:600;color:#6B6B73;letter-spacing:-.01em}
 .gld-tier__lab.is-here b{font-weight:800;color:#111}
 .gld-tier__lab span{font-size:10px;color:#9A9AA2;font-variant-numeric:tabular-nums}
 .gld-tier__foot{margin:10px 0 0;font-size:11.5px;color:#6B6B73;font-variant-numeric:tabular-nums}
-.gld-tier__info{flex:0 0 auto;width:26px;height:26px;padding:0;border:1px solid #D9D9DD;border-radius:50%;background:#fff;color:#6B6B73;
+.gld-tier__info{flex:0 0 auto;margin-top:-9px;width:26px;height:26px;padding:0;border:1px solid #D9D9DD;border-radius:50%;background:#fff;color:#6B6B73;
   font:700 13px/1 Georgia,serif;cursor:pointer;transition:border-color .2s ease,color .2s ease,background .2s ease}
 .gld-tier__info:hover,.gld-tier__info:focus-visible{border-color:#111;color:#111;background:#F6F6F7}
 .gld-tier__info:focus-visible{outline:2px solid #E4002B;outline-offset:2px}
-.gld-tier__perks{position:absolute;right:14px;bottom:calc(100% - 8px);z-index:30;width:min(310px,calc(100vw - 48px));
+/* Opens DOWNWARD: the meter sits at the top of the basket, so there is never room above it.
+   Capped and scrollable so a long ladder cannot run off a short phone screen. */
+.gld-tier__perks{position:absolute;right:14px;top:calc(100% - 6px);z-index:30;width:min(310px,calc(100vw - 48px));
+  max-height:min(62vh,440px);overflow-y:auto;-webkit-overflow-scrolling:touch;
   padding:14px 16px;border:1px solid #E7E7E9;border-radius:14px;background:#fff;box-shadow:0 18px 40px rgba(17,17,17,.16);text-align:left}
 .gld-tier__perks[hidden]{display:none}
 .gld-tier__ptitle{margin:0 0 10px;font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#9A9AA2}
@@ -2719,7 +2731,11 @@ window.GLD_TIER = <?php echo wp_json_encode($cfg); ?>;
   if (!box || !CFG.rest) return;
   var ladder = CFG.ladder || [], cap = ladder.length ? ladder[ladder.length - 1].min : 1;
 
-  function rm(n, dp) { return 'RM' + (+n || 0).toFixed(dp || 0); }
+  function rm(n, dp) {
+    var parts = (+n || 0).toFixed(dp || 0).split('.');
+    parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    return 'RM' + parts.join('.');
+  }
   function tierAt(spend) { var t = ladder[0]; ladder.forEach(function (x) { if (spend >= x.min) t = x; }); return t; }
 
   // Built once; only the numbers move afterwards.
@@ -2738,6 +2754,7 @@ window.GLD_TIER = <?php echo wp_json_encode($cfg); ?>;
       }
       var l = document.createElement('span');
       l.className = 'gld-tier__lab'; l.dataset.key = t.key;
+      l.style.left = (t.min / cap * 100) + '%';
       l.innerHTML = '<b></b><span></span>';
       l.querySelector('b').textContent = t.name === 'GALADO Black' ? 'Black' : t.name;
       l.querySelector('span').textContent = t.min === 0 ? 'Join' : rm(t.min);
