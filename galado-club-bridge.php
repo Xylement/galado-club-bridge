@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.56.2
+ * Version: 0.57.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,11 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.56.2';
+    const VERSION  = '0.57.0';
+    // 0.57.0: near-miss wording on the tier meter (owner picked 'copy only' from three mocked options).
+    //   Within GALADO_TIER_NEAR_MISS RM of the next tier the headline becomes 'So close. RMx more after this
+    //   order and <Tier> is yours.' Wording ONLY - no badge, no pulse, nothing that turns encouragement into
+    //   pressure. Distance filterable via galado_tier_near_miss_rm (default 50) so it can be tuned live.
     // 0.56.2: owner feedback on the live basket. (a) THE BASKET READ AS RM0 even with items in it:
     //   WooCommerce does not boot the cart on a REST request, so WC()->cart was empty - my_tier now calls
     //   wc_load_cart(), and returns null rather than 0 when it still cannot read one, so the page falls back
@@ -2673,6 +2677,10 @@ if(st&&st.snooze&&Date.now()<st.snooze){showChip()}else{setTimeout(openAll,7000)
             'rest'   => esc_url_raw(rest_url('galado-club/v1/my-tier')),
             'nonce'  => wp_create_nonce('wp_rest'),
             'order'  => $cart_total,
+            // Within this many RM of the next tier the headline switches to the near-miss
+            // wording. Filterable so the distance can be tuned without a deploy: too wide and
+            // "so close" stops meaning anything, too narrow and almost nobody sees it.
+            'near'   => (float) apply_filters('galado_tier_near_miss_rm', 50),
             'ladder' => self::tier_ladder(),
             'perks'  => self::tier_perks(),
         ];
@@ -2825,7 +2833,12 @@ window.GLD_TIER = <?php echo wp_json_encode($cfg); ?>;
       head.textContent = 'This order takes you to ' + reachedTier.name + '.';
       mark.style.background = reachedTier.colour;
     } else if (next) {
-      head.textContent = rm(Math.ceil(next.min - projected)) + ' more after this order to reach ' + next.name + '.';
+      var gap = Math.ceil(next.min - projected);
+      // Close enough to be worth naming as close. Wording only, deliberately: no badge, no
+      // pulse, nothing that turns encouragement into pressure.
+      head.textContent = (gap <= (+CFG.near || 0))
+        ? 'So close. ' + rm(gap) + ' more after this order and ' + next.name + ' is yours.'
+        : rm(gap) + ' more after this order to reach ' + next.name + '.';
       mark.style.background = '#E4002B';
     } else {
       head.textContent = "You're at GALADO Black, the top of the Club.";
