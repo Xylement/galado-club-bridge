@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.57.1
+ * Version: 0.58.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,9 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.57.1';
+    const VERSION  = '0.58.0';
+    // 0.58.0: TIER METER LIVE TO ALL SIGNED-IN MEMBERS (owner go-ahead 2026-08-05). Guests still get
+    //   nothing emitted at all. Filter galado_tier_meter_public back to false to revert to admins only.
     // 0.57.1: tier meter moved BELOW the Use Shopping Credit prompt (hook priority 5 -> 20; Points &
     //   Rewards renders at 15 and 16). Owner's call: credits are an action, the bar is context.
     // 0.57.0: near-miss wording on the tier meter (owner picked 'copy only' from three mocked options).
@@ -2665,14 +2667,17 @@ if(st&&st.snooze&&Date.now()<st.snooze){showChip()}else{setTimeout(openAll,7000)
      * Cart-page tier meter for signed-in members: where this order lands them on the
      * ladder. Ports the iOS cart projection card (App/Features/Shop/CartView.swift).
      *
-     * Ships to administrators only until `galado_tier_meter_public` is flipped to true,
-     * so it can be reviewed on the live cart before every member sees it.
+     * Visible to every signed-in member. Guests get nothing at all: this returns before any
+     * markup is emitted, so a logged-out cart is exactly the page it was before this existed.
+     * `galado_tier_meter_public` can be filtered to false to fall back to administrators only.
      */
     public static function render_tier_meter() {
         if (!is_user_logged_in()) {
             return;
         }
-        if (!apply_filters('galado_tier_meter_public', false) && !current_user_can('manage_woocommerce')) {
+        // Open to every signed-in member since 2026-08-05 (owner). The filter stays so it can be
+        // turned off again without a deploy: return false and it falls back to administrators only.
+        if (!apply_filters('galado_tier_meter_public', true) && !current_user_can('manage_woocommerce')) {
             return;
         }
         // This hook runs on the cart page, where the cart is genuinely loaded, so the basket
