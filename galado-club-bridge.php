@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.58.1
+ * Version: 0.58.2
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,10 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.58.1';
+    const VERSION  = '0.58.2';
+    // 0.58.2: crossing a tier silenced the near-miss line, so a basket that reached Gold and stopped
+    //   RM27 short of Diamond never mentioned Diamond. The crossing message now carries the next tier
+    //   too when it is inside the near-miss window.
     // 0.58.1: the bar never moved. wc_load_cart() inside a REST request returns an EMPTY cart, so
     //   /my-tier answered a confident RM0 while the shopper's basket held RM134. The endpoint no longer
     //   reports the basket at all; the page reads it from the totals row WooCommerce already rendered,
@@ -2852,7 +2855,18 @@ window.GLD_TIER = <?php echo wp_json_encode($cfg); ?>;
 
     var head = box.querySelector('.gld-tier__headline'), mark = box.querySelector('.gld-tier__mark');
     if (reachedTier.min > now.min) {
-      head.textContent = 'This order takes you to ' + reachedTier.name + '.';
+      // Crossing a tier used to silence the near-miss line entirely, so a basket that
+      // reached Gold and stopped RM27 short of Diamond said nothing about Diamond
+      // (owner, 2026-08-05). Celebrate the crossing, then point at the next one when it
+      // is genuinely within reach.
+      var over = 'This order takes you to ' + reachedTier.name + '.';
+      if (next) {
+        var near = Math.ceil(next.min - projected);
+        if (near <= (+CFG.near || 0)) {
+          over += ' ' + next.name + ' is only ' + rm(near) + ' further.';
+        }
+      }
+      head.textContent = over;
       mark.style.background = reachedTier.colour;
     } else if (next) {
       var gap = Math.ceil(next.min - projected);
