@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.52.0
+ * Version: 0.53.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.52.0';   // 0.52.0: /app-order prices staged PWP lines from the galado-bundles server quote (iOS parity with the web engine)
+    const VERSION  = '0.53.0';   // 0.53.0: /app-order accumulates PWP claimed circles across quote blocks (once-per-circle spans the whole order)
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -1384,8 +1384,16 @@ final class Galado_Club_Bridge {
                 $pwp_saving = 0.0;
                 $pwp_quotes = is_array($p['pwp_quotes'] ?? null) ? $p['pwp_quotes'] : [];
                 if ($pwp_quotes && class_exists('GALADO_Bundles_App')) {
+                    // Once-per-circle spans the WHOLE order: circles claimed by
+                    // an earlier block are declared to the next one, so a second
+                    // purchase of the same circle pays the normal price (the
+                    // cart engine gets this by reading WC()->cart).
+                    $claimed = [];
                     foreach ($pwp_quotes as $q) {
                         if (!is_array($q)) continue;
+                        $q['claimed'] = array_values(array_unique(array_merge(
+                            array_map('strval', (array) ($q['claimed'] ?? [])), $claimed
+                        )));
                         $quote = GALADO_Bundles_App::quote($q);
                         if (empty($quote['ok'])) {
                             return new WP_Error('bad_request',
@@ -1394,6 +1402,9 @@ final class Galado_Club_Bridge {
                         foreach ((array) $quote['lines'] as $ql) {
                             $key = (int) $ql['product_id'] . '|' . (int) $ql['variation_id'];
                             $pwp_map[$key][] = ['unit' => (float) $ql['unit'], 'qty' => (int) $ql['qty']];
+                            if (!empty($ql['pwp']) && !empty($ql['circle'])) {
+                                $claimed[] = (string) $ql['circle'];
+                            }
                         }
                         $pwp_saving += (float) ($quote['totals']['saving'] ?? 0);
                     }
