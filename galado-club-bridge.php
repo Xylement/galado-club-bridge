@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.58.0
+ * Version: 0.58.1
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,11 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.58.0';
+    const VERSION  = '0.58.1';
+    // 0.58.1: the bar never moved. wc_load_cart() inside a REST request returns an EMPTY cart, so
+    //   /my-tier answered a confident RM0 while the shopper's basket held RM134. The endpoint no longer
+    //   reports the basket at all; the page reads it from the totals row WooCommerce already rendered,
+    //   which is the number the shopper is looking at and which Woo re-renders on every quantity change.
     // 0.58.0: TIER METER LIVE TO ALL SIGNED-IN MEMBERS (owner go-ahead 2026-08-05). Guests still get
     //   nothing emitted at all. Filter galado_tier_meter_public back to false to revert to admins only.
     // 0.57.1: tier meter moved BELOW the Use Shopping Credit prompt (hook priority 5 -> 20; Points &
@@ -2641,25 +2645,14 @@ if(st&&st.snooze&&Date.now()<st.snooze){showChip()}else{setTimeout(openAll,7000)
             // rather than showing a plausible but invented position.
             return ['ok' => false];
         }
-        // WooCommerce does not boot the cart on a REST request, so WC()->cart is empty here
-        // unless it is asked for. Without this the basket always reported RM0.
-        if (function_exists('WC')) {
-            if (!WC()->cart && function_exists('wc_load_cart')) {
-                wc_load_cart();
-            }
-        }
-        // null, not 0: "could not read the basket" and "the basket is empty" are different
-        // answers, and the page falls back to its own figure for the first rather than
-        // telling the member their basket adds nothing.
-        $total = null;
-        if (function_exists('WC') && WC()->cart) {
-            $total = (float) WC()->cart->get_total('edit');
-        }
+        // The basket is deliberately NOT read here. wc_load_cart() in a REST request yields an
+        // EMPTY cart rather than the shopper's, so this returned a confident RM0 while their
+        // basket held RM134 (owner, 2026-08-05). The page reads the basket from the totals row
+        // WooCommerce itself rendered, which is the same number the shopper is looking at.
         return [
             'ok'       => true,
             'tier'     => (string) ($summary['tier'] ?? 'silver'),
             'lifetime' => (float) $summary['lifetimeSpend'],
-            'order'    => $total,
         ];
     }
 
@@ -2687,6 +2680,8 @@ if(st&&st.snooze&&Date.now()<st.snooze){showChip()}else{setTimeout(openAll,7000)
             'rest'   => esc_url_raw(rest_url('galado-club/v1/my-tier')),
             'nonce'  => wp_create_nonce('wp_rest'),
             'order'  => $cart_total,
+            'dec'    => function_exists('wc_get_price_decimal_separator') ? wc_get_price_decimal_separator() : '.',
+            'sep'    => function_exists('wc_get_price_thousand_separator') ? wc_get_price_thousand_separator() : ',',
             // Within this many RM of the next tier the headline switches to the near-miss
             // wording. Filterable so the distance can be tuned without a deploy: too wide and
             // "so close" stops meaning anything, too narrow and almost nobody sees it.
@@ -2830,10 +2825,27 @@ window.GLD_TIER = <?php echo wp_json_encode($cfg); ?>;
     if (!host.firstChild) host.innerHTML = '';
   }
 
+  /**
+   * The basket total, taken from the totals row WooCommerce rendered on this very page.
+   * That is the same figure the shopper is reading, and it stays correct after a quantity
+   * change because Woo re-renders that row itself. Falls back to the total captured server
+   * side when the row is missing (a theme could rename it), and only then to zero.
+   */
+  function basketTotal() {
+    var el = document.querySelector('.order-total .woocommerce-Price-amount')
+          || document.querySelector('.order-total .amount');
+    if (el) {
+      var t = String(el.textContent || '');
+      if (CFG.sep) { t = t.split(CFG.sep).join(''); }
+      if (CFG.dec && CFG.dec !== '.') { t = t.split(CFG.dec).join('.'); }
+      var n = parseFloat(t.replace(/[^0-9.]/g, ''));
+      if (isFinite(n)) return n;
+    }
+    return +CFG.order || 0;
+  }
+
   function paint(d) {
-    // A null basket means the request could not read it, not that it is empty: keep the
-    // figure the cart page itself rendered with.
-    var order = (d.order === null || d.order === undefined) ? (+CFG.order || 0) : (+d.order || 0);
+    var order = basketTotal();
     var life = +d.lifetime || 0, projected = life + order;
     var now = tierAt(life), next = null, reachedTier = tierAt(projected);
     ladder.forEach(function (t) { if (next === null && projected < t.min) next = t; });
