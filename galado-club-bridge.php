@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.57.0
+ * Version: 0.57.1
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,9 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.57.0';
+    const VERSION  = '0.57.1';
+    // 0.57.1: tier meter moved BELOW the Use Shopping Credit prompt (hook priority 5 -> 20; Points &
+    //   Rewards renders at 15 and 16). Owner's call: credits are an action, the bar is context.
     // 0.57.0: near-miss wording on the tier meter (owner picked 'copy only' from three mocked options).
     //   Within GALADO_TIER_NEAR_MISS RM of the next tier the headline becomes 'So close. RMx more after this
     //   order and <Tier> is yours.' Wording ONLY - no badge, no pulse, nothing that turns encouragement into
@@ -119,7 +121,10 @@ final class Galado_Club_Bridge {
         add_action('woocommerce_order_status_processing', [__CLASS__, 'consume_winback'], 20, 1);
         add_action('woocommerce_order_status_completed', [__CLASS__, 'consume_winback'], 20, 1);
         // Cart-page tier meter for signed-in members (ports the iOS cart projection card).
-        add_action('woocommerce_before_cart', [__CLASS__, 'render_tier_meter'], 5);
+        // Priority 20 puts it BELOW Points & Rewards, which renders its earn message at 15 and
+        // the "Use Shopping Credit" prompt at 16. Credits are something the shopper can act on
+        // right now; the tier bar is context, so credits lead (owner, 2026-08-05).
+        add_action('woocommerce_before_cart', [__CLASS__, 'render_tier_meter'], 20);
         // POS (pos.galado.com.my) orders carry _pos_order meta: the sale happened at the
         // counter, so suppress WooCommerce CUSTOMER emails and keep the order out of
         // Klaviyo (flows like post-purchase would otherwise fire on walk-in sales).
