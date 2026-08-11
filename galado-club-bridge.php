@@ -21,7 +21,12 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.58.2';
+    const VERSION  = '0.59.0';
+    // 0.59.0: the join popup now forwards the exact notice it showed the visitor, so the Club can
+    //   record what someone was actually told. Klaviyo is cancelled in September and the popup is
+    //   our biggest signup source; the Club will record these as joins, NOT marketing consent,
+    //   because this popup only ever promised a sign-in link. Wording is now a single constant so
+    //   the rendered line and the forwarded line cannot drift apart.
     // 0.58.2: crossing a tier silenced the near-miss line, so a basket that reached Gold and stopped
     //   RM27 short of Diamond never mentioned Diamond. The crossing message now carries the next tier
     //   too when it is inside the near-miss window.
@@ -50,6 +55,18 @@ final class Galado_Club_Bridge {
     // and there is never room above (it was running off the top of the screen on a phone), capped and
     // scrollable so a long ladder cannot overflow; this order's slice of the bar reads at 0.55 alpha
     // since it is often thin; money over a thousand carries separators.
+    // The exact line shown under the join-popup button. ONE definition, used both to render the
+    // markup and to forward what the visitor saw to the Club, so the two cannot drift apart.
+    //
+    // Resolved here and never read back from the browser: anything the client can set an attacker
+    // can set, and a forgeable record of what someone was told is worse than no record at all.
+    //
+    // Note what it does NOT say. No mention of marketing, newsletters or unsubscribing, which is
+    // exactly why the Club records these taps as a join carrying no consent (owner's call,
+    // 2026-08-11). If this wording ever gains a marketing line, the Club side has to be revisited
+    // in the same change, or we start emailing people on a promise we did not make.
+    const POPUP_NOTICE = 'One tap, no password. We’ll email you a sign-in link.';
+
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
@@ -2381,8 +2398,14 @@ final class Galado_Club_Bridge {
         $res = wp_remote_post(GALADO_CLUB_URL . '/api/claim/request', [
             'timeout' => 8,
             'headers' => ['content-type' => 'application/json', 'x-club-bridge-secret' => GALADO_CLUB_BRIDGE_SECRET],
+            // noticeText: the wording this visitor was actually shown, resolved HERE from the
+            // same constant that rendered it rather than accepted from the request. The Club
+            // stores it as the evidence for why these people carry no marketing consent.
+            // Only for the popup: the blog card is rendered by a separate surface with its
+            // own wording, and the Club does not record joins from it today.
             'body'    => wp_json_encode(array_merge(
                 ['email' => $email, 'name' => mb_substr($name, 0, 60), 'clientIp' => $ip, 'source' => $source],
+                'popup' === $source ? ['noticeText' => self::POPUP_NOTICE] : [],
                 $ref ? ['ref' => $ref] : []
             )),
         ]);
@@ -2478,7 +2501,7 @@ final class Galado_Club_Bridge {
 <button type="submit" class="pj-btn">I&#8217;M IN &#10022;</button>
 <p class="pj-err"></p>
 </form>
-<p class="pj-note">One tap, no password. We&#8217;ll email you a sign-in link.</p>
+<p class="pj-note"><?php echo esc_html(self::POPUP_NOTICE); ?></p>
 <button type="button" class="pj-no">No thanks</button>
 </div>
 <div class="pj-done">
