@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.58.2
+ * Version: 0.60.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -61,11 +61,20 @@ final class Galado_Club_Bridge {
     // Resolved here and never read back from the browser: anything the client can set an attacker
     // can set, and a forgeable record of what someone was told is worse than no record at all.
     //
-    // Note what it does NOT say. No mention of marketing, newsletters or unsubscribing, which is
-    // exactly why the Club records these taps as a join carrying no consent (owner's call,
-    // 2026-08-11). If this wording ever gains a marketing line, the Club side has to be revisited
-    // in the same change, or we start emailing people on a promise we did not make.
+    // Note what it does NOT say. No mention of marketing, newsletters or unsubscribing, and that
+    // stays true: a Club join is not marketing consent and this line must never imply it is.
+    // Consent, when it happens, comes from the separate ticked line below (POPUP_OPTIN_NOTICE),
+    // never from this one. If this wording ever gains a marketing line, the Club side has to be
+    // revisited in the same change, or we start emailing people on a promise we did not make.
     const POPUP_NOTICE = 'One tap, no password. We’ll email you a sign-in link.';
+
+    // The marketing opt-in shown inside the join popup, ticked by default (matching the checkout
+    // box). Deliberately a SECOND visible thing rather than a silent bundle: joining the Club and
+    // agreeing to be emailed are two different answers, and the visitor gets to give both.
+    // This same constant renders the label AND is stored as the consent record, so the evidence
+    // can never drift from what was on screen. Wording matches the footer band (snippet #215) so
+    // the two capture surfaces cannot disagree.
+    const POPUP_OPTIN_NOTICE = 'Also email me new drops, restocks and member offers. You can unsubscribe from any email.';
 
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
@@ -2419,6 +2428,20 @@ final class Galado_Club_Bridge {
         if ($code >= 400) {
             return new WP_Error('failed', 'Something went sideways. Please try again.', ['status' => 502]);
         }
+        // Marketing consent, only when the visitor left the box ticked, and only from the popup:
+        // the blog card renders its own form with no tick and must stay untouched. Fires AFTER the
+        // Club call succeeded, so we never record consent against a join that did not happen.
+        //
+        // galado_newsletter_emit() lives in Code Snippet #215, which someone can deactivate in one
+        // click. Without function_exists() that click would fatal every popup submit, which is the
+        // same shape as the refactor that took the store down. The guard is not optional.
+        //
+        // Its return value is deliberately ignored: it blocks for up to 5s and a ledger problem
+        // must never fail a Club join. A dropped write leaves a log line on the store instead.
+        if (!empty($request->get_param('optin')) && 'popup' === $source
+            && function_exists('galado_newsletter_emit')) {
+            galado_newsletter_emit($email, $name, 'popup', self::POPUP_OPTIN_NOTICE);
+        }
         return ['ok' => true];
     }
 
@@ -2453,6 +2476,8 @@ final class Galado_Club_Bridge {
 #gldpj input[type=text],#gldpj input[type=email]{display:block;width:100%;box-sizing:border-box;border:0;border-bottom:2px solid #D9D9D9;padding:10px 2px;margin:0 0 12px;font-size:15px;color:#111;background:transparent;outline:none;border-radius:0;}
 #gldpj input:focus{border-bottom-color:#111111;}
 #gldpj .pj-hp{position:absolute;left:-9999px;opacity:0;height:0;width:0;}
+#gldpj .pj-optin{display:flex;align-items:flex-start;gap:10px;margin:4px 0 2px;padding:6px 0;cursor:pointer;font-size:13px;line-height:1.45;color:#111111;text-align:left;}
+#gldpj .pj-optin input{flex:none;width:18px;height:18px;margin:1px 0 0;accent-color:#E4002B;cursor:pointer;}
 #gldpj .pj-btn{display:block;width:100%;border:0;cursor:pointer;background:#E4002B;color:#fff;font-family:'Archivo','Arial Black',Arial,sans-serif;font-weight:800;font-size:16px;letter-spacing:1px;padding:15px 20px;border-radius:999px;margin-top:6px;}
 #gldpj .pj-btn:disabled{opacity:.6;cursor:default;}
 #gldpj .pj-note{margin:12px 0 0;font-size:12px;color:#8C8C8C;text-align:center;}
@@ -2498,6 +2523,9 @@ final class Galado_Club_Bridge {
 <input type="text" name="name" placeholder="Your name" maxlength="60" autocomplete="given-name"/>
 <input type="email" name="email" placeholder="Email" maxlength="254" required autocomplete="email"/>
 <input type="text" name="website" class="pj-hp" tabindex="-1" autocomplete="off" aria-hidden="true"/>
+<?php if (function_exists('galado_newsletter_is_live') && galado_newsletter_is_live()) : ?>
+<label class="pj-optin"><input type="checkbox" name="optin" checked/><span><?php echo esc_html(self::POPUP_OPTIN_NOTICE); ?></span></label>
+<?php endif; ?>
 <button type="submit" class="pj-btn">I&#8217;M IN &#10022;</button>
 <p class="pj-err"></p>
 </form>
@@ -2595,9 +2623,10 @@ var card=f.closest('.pj-card')||document,err=card.querySelector('.pj-err'),btn=f
 var email=(f.querySelector('input[name=email]').value||'').trim();
 var name=(f.querySelector('input[name=name]').value||'').trim();
 var hp=(f.querySelector('input[name=website]').value||'');
+var ck=f.querySelector('input[name=optin]');
 if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){err.textContent='Please enter a valid email.';err.style.display='block';return}
 err.style.display='none';btn.disabled=true;btn.textContent='Sending...';
-fetch(GLDPJ_REST,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,email:email,website:hp})})
+fetch(GLDPJ_REST,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,email:email,website:hp,optin:ck?ck.checked:false})})
 .then(function(r){return r.json().then(function(b){return{ok:r.ok,body:b}})})
 .then(function(r){if(r.ok){card.querySelector('.pj-mail').textContent=email;card.querySelector('.pj-main').style.display='none';card.querySelector('.pj-done').style.display='block';joined()}else{err.textContent=(r.body&&r.body.message)||'Something went sideways. Please try again.';err.style.display='block';btn.disabled=false;btn.textContent='JOIN'}})
 .catch(function(){err.textContent='Could not reach us. Please try again.';err.style.display='block';btn.disabled=false;btn.textContent='JOIN'});
