@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.61.0
+ * Version: 0.61.1
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.61.0';
+    const VERSION  = '0.61.1';
     // 0.59.0: the join popup now forwards the exact notice it showed the visitor, so the Club can
     //   record what someone was actually told. Klaviyo is cancelled in September and the popup is
     //   our biggest signup source; the Club will record these as joins, NOT marketing consent,
@@ -1175,11 +1175,19 @@ final class Galado_Club_Bridge {
     /** Club -> WP: mirror tier into user meta (Klaviyo segments + early-access gate). */
     public static function rest_routes() {
         // Public version ping — confirms which plugin build is live (no secrets exposed).
+        //
+        // `sha` is a fingerprint of this file as it sits on the server. VERSION alone answers a
+        // weaker question: it proves a file shipped, not which contents shipped, and it can be
+        // bumped by a commit whose actual edit was lost in a bad merge. The hash cannot lie.
+        // It exists because changes here can be invisible from outside: anything behind
+        // galado_marketing_optin_live renders nothing at all while the gate is off, so there is
+        // otherwise no way to confirm the deployed behaviour before it is live to everyone.
         register_rest_route('galado-club/v1', '/ping', [
             'methods'             => 'GET',
             'permission_callback' => '__return_true',
             'callback'            => function () {
-                return ['ok' => true, 'version' => self::VERSION, 'hooks' => ['transition_comment_status', 'comment_post', 'woocommerce_checkout_create_order', 'woocommerce_cart_calculate_fees', 'user_register']];
+                $sha = hash_file('sha256', __FILE__);
+                return ['ok' => true, 'version' => self::VERSION, 'sha' => $sha ? substr($sha, 0, 12) : null, 'hooks' => ['transition_comment_status', 'comment_post', 'woocommerce_checkout_create_order', 'woocommerce_cart_calculate_fees', 'user_register']];
             },
         ]);
         // Storefront join popup -> Club magic link. Public (guests submit it), defended in
