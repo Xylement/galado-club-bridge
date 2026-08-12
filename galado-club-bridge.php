@@ -68,9 +68,12 @@ final class Galado_Club_Bridge {
     // revisited in the same change, or we start emailing people on a promise we did not make.
     const POPUP_NOTICE = 'One tap, no password. We’ll email you a sign-in link.';
 
-    // The marketing opt-in shown inside the join popup, ticked by default (matching the checkout
-    // box). Deliberately a SECOND visible thing rather than a silent bundle: joining the Club and
-    // agreeing to be emailed are two different answers, and the visitor gets to give both.
+    // The marketing opt-in shown inside the join popup. UNTICKED by default (owner's call,
+    // 2026-08-12): joining is the thing they came for, being emailed is a separate yes they have
+    // to actually give. Deliberately a SECOND visible thing rather than a silent bundle: joining
+    // the Club and agreeing to be emailed are two different answers, and the visitor gives both.
+    // The tick is OPTIONAL and must stay optional. Requiring it to submit would make marketing
+    // consent the price of Club membership, which is not consent, it is a toll.
     // This same constant renders the label AND is stored as the consent record, so the evidence
     // can never drift from what was on screen. Wording matches the footer band (snippet #215) so
     // the two capture surfaces cannot disagree.
@@ -2530,7 +2533,7 @@ final class Galado_Club_Bridge {
 <input type="email" name="email" placeholder="Email" maxlength="254" required autocomplete="email"/>
 <input type="text" name="website" class="pj-hp" tabindex="-1" autocomplete="off" aria-hidden="true"/>
 <?php if (function_exists('galado_newsletter_is_live') && galado_newsletter_is_live()) : ?>
-<label class="pj-optin"><input type="checkbox" name="optin" checked/><span><?php echo esc_html(self::POPUP_OPTIN_NOTICE); ?></span></label>
+<label class="pj-optin"><input type="checkbox" name="optin"/><span><?php echo esc_html(self::POPUP_OPTIN_NOTICE); ?></span></label>
 <?php endif; ?>
 <button type="submit" class="pj-btn">I&#8217;M IN &#10022;</button>
 <p class="pj-err"></p>
