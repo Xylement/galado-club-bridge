@@ -2437,9 +2437,21 @@ final class Galado_Club_Bridge {
         if ($code >= 400) {
             return new WP_Error('failed', 'Something went sideways. Please try again.', ['status' => 502]);
         }
-        // Marketing consent, only when the visitor left the box ticked, and only from the popup:
-        // the blog card renders its own form with no tick and must stay untouched. Fires AFTER the
-        // Club call succeeded, so we never record consent against a join that did not happen.
+        // Marketing consent, only when the visitor left the box ticked. Fires AFTER the Club call
+        // succeeded, so we never record consent against a join that did not happen.
+        //
+        // Any join surface may ask: $source is already narrowed to the allowlist above, and a
+        // surface that renders no tick cannot send `optin`, so this stays inert for it. That is why
+        // there is no per-source condition here. Two doors into the same Club asking different
+        // things of people is the inconsistency this avoids.
+        //
+        // THE PRICE OF THAT: every surface that shows a tick MUST render POPUP_OPTIN_NOTICE
+        // verbatim, because that is the wording stored as the consent record. A surface wording it
+        // differently would file consent under a sentence its visitor never read. Read the constant,
+        // do not copy the string.
+        //
+        // $source is passed through rather than hardcoded so the ledger records which door they
+        // actually came in by, which is what the Audience tab counts.
         //
         // galado_newsletter_emit() lives in Code Snippet #215, which someone can deactivate in one
         // click. Without function_exists() that click would fatal every popup submit, which is the
@@ -2447,9 +2459,8 @@ final class Galado_Club_Bridge {
         //
         // Its return value is deliberately ignored: it blocks for up to 5s and a ledger problem
         // must never fail a Club join. A dropped write leaves a log line on the store instead.
-        if (!empty($request->get_param('optin')) && 'popup' === $source
-            && function_exists('galado_newsletter_emit')) {
-            galado_newsletter_emit($email, $name, 'popup', self::POPUP_OPTIN_NOTICE);
+        if (!empty($request->get_param('optin')) && function_exists('galado_newsletter_emit')) {
+            galado_newsletter_emit($email, $name, $source, self::POPUP_OPTIN_NOTICE);
         }
         return ['ok' => true];
     }
