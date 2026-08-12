@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.60.0
+ * Version: 0.61.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.60.0';
+    const VERSION  = '0.61.0';
     // 0.59.0: the join popup now forwards the exact notice it showed the visitor, so the Club can
     //   record what someone was actually told. Klaviyo is cancelled in September and the popup is
     //   our biggest signup source; the Club will record these as joins, NOT marketing consent,
@@ -2587,6 +2587,14 @@ function hideChip(){chips().forEach(function(c){c.style.display='none'})}
 function openAll(){boxes().forEach(function(b){b.classList.add('on');b.style.display='flex'});hideChip()}
 function closeAll(d){if(!isOpen())return;boxes().forEach(function(b){b.classList.remove('on');b.style.display='none'});showChip();if(d)save({snooze:Date.now()+d*864e5})}
 function joined(){hideChip();save({joined:true})}
+/* Submit telemetry. Same event name and shape as the blog card's (snippet #149) so the two
+   surfaces are comparable side by side, distinguished by method. Fires ONLY after a successful
+   response, matching the card, or the numbers mean different things and comparing them teaches
+   us nothing. NEVER carries the email address: this counts the submit, never who submitted.
+   Without this the popup produces members and no submit count, so it has no completion rate. */
+function track(optin){var p={method:'popup',join_source:'popup',optin:!!optin};
+if(typeof window.gtag==='function'){window.gtag('event','club_join_submit',p)}
+else if(window.dataLayer&&window.dataLayer.push){p.event='club_join_submit';window.dataLayer.push(p)}}
 /* Minimised coin is draggable (pointer events = touch + mouse): it sits bottom-left by
    default, which can cover a product page's sticky add-to-cart price bar - so customers
    can move it anywhere; the spot is remembered across pages. A plain tap still opens
@@ -2648,7 +2656,7 @@ if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){err.textContent='Please enter a va
 err.style.display='none';btn.disabled=true;btn.textContent='Sending...';
 fetch(GLDPJ_REST,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,email:email,website:hp,optin:ck?ck.checked:false})})
 .then(function(r){return r.json().then(function(b){return{ok:r.ok,body:b}})})
-.then(function(r){if(r.ok){card.querySelector('.pj-mail').textContent=email;card.querySelector('.pj-main').style.display='none';card.querySelector('.pj-done').style.display='block';joined()}else{err.textContent=(r.body&&r.body.message)||'Something went sideways. Please try again.';err.style.display='block';btn.disabled=false;btn.textContent='JOIN'}})
+.then(function(r){if(r.ok){card.querySelector('.pj-mail').textContent=email;card.querySelector('.pj-main').style.display='none';card.querySelector('.pj-done').style.display='block';joined();track(ck&&ck.checked)}else{err.textContent=(r.body&&r.body.message)||'Something went sideways. Please try again.';err.style.display='block';btn.disabled=false;btn.textContent='JOIN'}})
 .catch(function(){err.textContent='Could not reach us. Please try again.';err.style.display='block';btn.disabled=false;btn.textContent='JOIN'});
 },true);
 if(st&&st.snooze&&Date.now()<st.snooze){showChip()}else{setTimeout(openAll,7000)}
