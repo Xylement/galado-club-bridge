@@ -2407,9 +2407,15 @@ final class Galado_Club_Bridge {
         $res = wp_remote_post(GALADO_CLUB_URL . '/api/claim/request', [
             'timeout' => 8,
             'headers' => ['content-type' => 'application/json', 'x-club-bridge-secret' => GALADO_CLUB_BRIDGE_SECRET],
-            // noticeText: the wording this visitor was actually shown, resolved HERE from the
+            // noticeText: the join wording this visitor was actually shown, resolved HERE from the
             // same constant that rendered it rather than accepted from the request. The Club
-            // stores it as the evidence for why these people carry no marketing consent.
+            // stores it as the evidence for what the JOIN itself promised.
+            //
+            // It is not the whole story once the opt-in tick is live: a visitor who ticks also saw
+            // POPUP_OPTIN_NOTICE, and that wording goes straight to the send ledger with their
+            // consent, not through here. Do NOT add it to this payload. One system decides who
+            // gets email, and a second copy of a consent record is a second copy that can drift.
+            //
             // Only for the popup: the blog card is rendered by a separate surface with its
             // own wording, and the Club does not record joins from it today.
             'body'    => wp_json_encode(array_merge(
