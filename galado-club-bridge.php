@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.61.1
+ * Version: 0.61.2
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -2552,7 +2552,7 @@ final class Galado_Club_Bridge {
 <input type="email" name="email" placeholder="Email" maxlength="254" required autocomplete="email"/>
 <input type="text" name="website" class="pj-hp" tabindex="-1" autocomplete="off" aria-hidden="true"/>
 <?php if (function_exists('galado_newsletter_is_live') && galado_newsletter_is_live()) : ?>
-<label class="pj-optin"><input type="checkbox" name="optin"/><span><?php echo esc_html(self::POPUP_OPTIN_NOTICE); ?></span></label>
+<label class="pj-optin"><input type="checkbox" name="optin" checked/><span><?php echo esc_html(self::POPUP_OPTIN_NOTICE); ?></span></label>
 <?php endif; ?>
 <button type="submit" class="pj-btn">I&#8217;M IN &#10022;</button>
 <p class="pj-err"></p>
