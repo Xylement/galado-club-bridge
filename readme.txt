@@ -17,6 +17,11 @@ push-to-Xylement/galado-club-bridge (WP Git Sync), NOT the zips in this folder
 (the v0.2.x zips are obsolete manual-upload relics — do not deploy them).
 
 == Changelog ==
+= 0.62.0 =
+* POS receipt email now shows counter-added custom items as real rows in the items
+  table (they were fee lines rendered as easy-to-miss totals rows), and the Subtotal
+  folds them in so the numbers read like the POS receipt. Email-scoped; web orders
+  and my-account order views unchanged.
 = 0.44.0 =
 * Member (Mid-Year Sale) pricing no longer leaks to the wc/v3 REST API. The POS
   reads catalogue prices over wc/v3 (consumer-key auth counts as logged-in), so it

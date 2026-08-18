@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.61.2
+ * Version: 0.62.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.61.2';
+    const VERSION  = '0.62.0';
     // 0.59.0: the join popup now forwards the exact notice it showed the visitor, so the Club can
     //   record what someone was actually told. Klaviyo is cancelled in September and the popup is
     //   our biggest signup source; the Club will record these as joins, NOT marketing consent,
@@ -188,6 +188,13 @@ final class Galado_Club_Bridge {
         add_filter('woocommerce_email_subject_customer_completed_order', [__CLASS__, 'pos_email_subject'], 10, 2);
         add_filter('woocommerce_email_heading_customer_completed_order', [__CLASS__, 'pos_email_heading'], 10, 2);
         add_action('woocommerce_email_before_order_table', [__CLASS__, 'pos_email_intro'], 10, 4);
+        // POS counter-added custom items ride the order as positive FEE lines, which
+        // Woo renders as small totals-footer rows: the emailed receipt looked like the
+        // item was missing (one product, "Subtotal" below the real total, a stray fee
+        // row). Promote positive fees into the email's items table and fold them into
+        // the Subtotal row. Email-scoped; web orders and my-account views untouched.
+        add_filter('woocommerce_email_order_items_table', [__CLASS__, 'pos_email_items_with_customs'], 10, 2);
+        add_filter('woocommerce_get_order_item_totals', [__CLASS__, 'pos_email_totals'], 20, 2);
         // The "Hide Checkout Shipping Address" plugin fatals on any programmatic order
         // creation (its woocommerce_new_order handler reads WC_Checkout->shipping_method,
         // which calls WC()->session->get() — null outside a real browser checkout). Detach
@@ -248,6 +255,62 @@ final class Galado_Club_Bridge {
         }
         self::$pos_email_override = false;
         return ['ok' => true, 'sent_to' => $order->get_billing_email()];
+    }
+
+    /** POS receipt email: render counter-added custom items (positive fee lines) as
+     *  rows in the items table. Fee names already carry " × N" when qty > 1; parse it
+     *  into the quantity column. Handles both the HTML and plain-text item tables. */
+    public static function pos_email_items_with_customs($items_html, $order) {
+        if (!self::is_pos_order($order)) {
+            return $items_html;
+        }
+        $plain = false === strpos($items_html, '<');
+        $rows = '';
+        $style = "text-align:left; vertical-align:middle; font-family: 'Helvetica Neue', Helvetica, Roboto, Arial, sans-serif; word-wrap:break-word;";
+        foreach ($order->get_fees() as $fee) {
+            $total = (float) $fee->get_total();
+            if ($total <= 0) {
+                continue; // negative fees = discounts/credits, they stay in the totals footer
+            }
+            $name = $fee->get_name();
+            $qty  = 1;
+            if (preg_match('/^(.*)\s+\x{00D7}\s+(\d+)$/u', $name, $m)) {
+                $name = $m[1];
+                $qty  = (int) $m[2];
+            }
+            if ($plain) {
+                $rows .= $name . ' X ' . $qty . ' = ' . wp_strip_all_tags(wc_price($total, ['currency' => $order->get_currency()])) . "\n";
+            } else {
+                $rows .= '<tr>'
+                    . '<td class="td" style="' . $style . '">' . esc_html($name) . '</td>'
+                    . '<td class="td" style="' . $style . '">' . (int) $qty . '</td>'
+                    . '<td class="td" style="' . $style . '">' . wc_price($total, ['currency' => $order->get_currency()]) . '</td>'
+                    . '</tr>';
+            }
+        }
+        return $items_html . $rows;
+    }
+
+    /** Companion to the promotion above, active only while an email is rendering
+     *  (the email templates fire woocommerce_email_header; storefront pages never
+     *  do): drop the promoted fees' footer rows and fold their value into the
+     *  Subtotal row so the numbers read like the POS receipt. */
+    public static function pos_email_totals($total_rows, $order = null) {
+        if (!self::is_pos_order($order) || !is_array($total_rows) || !did_action('woocommerce_email_header')) {
+            return $total_rows;
+        }
+        $promoted = 0.0;
+        foreach ($order->get_fees() as $item_id => $fee) {
+            $total = (float) $fee->get_total();
+            if ($total > 0) {
+                $promoted += $total;
+                unset($total_rows['fee_' . $item_id]);
+            }
+        }
+        if ($promoted > 0 && isset($total_rows['cart_subtotal'])) {
+            $total_rows['cart_subtotal']['value'] = wc_price($order->get_subtotal() + $promoted, ['currency' => $order->get_currency()]);
+        }
+        return $total_rows;
     }
 
     public static function pos_email_subject($subject, $order = null) {
