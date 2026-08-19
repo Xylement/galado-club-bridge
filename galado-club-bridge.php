@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.62.0
+ * Version: 0.63.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.62.0';
+    const VERSION  = '0.63.0';   // 0.63.0: PWP prices applied on the product BEFORE add_product (cached-items bug billed undiscounted totals)
     // 0.59.0: the join popup now forwards the exact notice it showed the visitor, so the Club can
     //   record what someone was actually told. Klaviyo is cancelled in September and the popup is
     //   our biggest signup source; the Club will record these as joins, NOT marketing consent,
@@ -1738,20 +1738,21 @@ final class Galado_Club_Bridge {
                         $order->delete(true);
                         return new WP_Error('bad_request', 'variation_id required for variable product ' . $pid, ['status' => 400]);
                     }
-                    $item_id = $order->add_product($product, $qty);
                     // PWP line: price it from the server quote (first unclaimed
                     // quoted entry for this product/variation), never from the
-                    // catalogue.
+                    // catalogue. Applied on the in-memory PRODUCT before
+                    // add_product(), the same way the web cart engine sets
+                    // prices — mutating the ITEM afterwards left the order's
+                    // cached items at catalogue price, so line rows said RM263
+                    // while calculate_totals() summed RM332 and the customer
+                    // was billed the undiscounted figure (found by a real E2E
+                    // order, 410900).
                     $pwp_key = $pid . '|' . $vid;
-                    if ($item_id && !empty($pwp_map[$pwp_key])) {
+                    if (!empty($pwp_map[$pwp_key]) && (int) $pwp_map[$pwp_key][0]['qty'] === $qty) {
                         $entry = array_shift($pwp_map[$pwp_key]);
-                        if ((int) $entry['qty'] === $qty) {
-                            $item = $order->get_item($item_id);
-                            $item->set_subtotal((string) ($entry['unit'] * $qty));
-                            $item->set_total((string) ($entry['unit'] * $qty));
-                            $item->save();
-                        }
+                        $product->set_price((string) $entry['unit']);
                     }
+                    $item_id = $order->add_product($product, $qty);
                     if ($item_id && is_array($l['custom'] ?? null)) {
                         $item = $order->get_item($item_id);
                         foreach ($l['custom'] as $c) {
