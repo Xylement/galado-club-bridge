@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.64.0
+ * Version: 0.64.1
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.64.0';   // 0.64.0: Samsung category thumbnails now swap over the Store API (iOS app showed iPhone renders on Galaxy browses)
+    const VERSION  = '0.64.1';   // 0.64.1: Samsung thumbnails also cover multi-model browses (the app's Samsung tile) — non-Ultra, matching the web parent page
     // 0.59.0: the join popup now forwards the exact notice it showed the visitor, so the Club can
     //   record what someone was actually told. Klaviyo is cancelled in September and the popup is
     //   our biggest signup source; the Club will record these as joins, NOT marketing consent,
@@ -262,23 +262,32 @@ final class Galado_Club_Bridge {
         if ('' === $raw || is_array($raw)) {
             return self::$samsung_ctx;   // unscoped list: leave images alone
         }
-        // A multi-category browse spans models, so no single render is right.
-        $ids = array_filter(array_map('trim', explode(',', (string) $raw)));
-        if (1 !== count($ids)) {
+        // The app's Samsung tile asks for every galaxy-* id at once, and the
+        // website's own parent category page answers that with the non-Ultra
+        // render, so a mixed Samsung browse resolves to 'regular'. Only an
+        // all-Ultra scope gets the Ultra render.
+        $refs = array_filter(array_map('trim', explode(',', (string) $raw)));
+        if (empty($refs)) {
             return self::$samsung_ctx;
         }
-        $ref  = reset($ids);
-        $term = is_numeric($ref)
-            ? get_term((int) $ref, 'product_cat')
-            : get_term_by('slug', $ref, 'product_cat');
-        if (!$term || is_wp_error($term)) {
-            return self::$samsung_ctx;
+        $all_ultra = true;
+        foreach ($refs as $ref) {
+            $term = is_numeric($ref)
+                ? get_term((int) $ref, 'product_cat')
+                : get_term_by('slug', $ref, 'product_cat');
+            if (!$term || is_wp_error($term)) {
+                return self::$samsung_ctx;
+            }
+            $slug = strtolower($term->slug);
+            // Anything outside the Samsung tree means no single render fits.
+            if ('samsung' !== $slug && 0 !== strpos($slug, 'galaxy-')) {
+                return self::$samsung_ctx;
+            }
+            if (false === strpos($slug, 'ultra')) {
+                $all_ultra = false;
+            }
         }
-        $slug = strtolower($term->slug);
-        if (0 !== strpos($slug, 'galaxy-')) {
-            return self::$samsung_ctx;
-        }
-        self::$samsung_ctx = (false !== strpos($slug, 'ultra')) ? 'ultra' : 'regular';
+        self::$samsung_ctx = $all_ultra ? 'ultra' : 'regular';
         return self::$samsung_ctx;
     }
 
