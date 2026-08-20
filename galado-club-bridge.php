@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.63.0
+ * Version: 0.64.0
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.63.0';   // 0.63.0: PWP prices applied on the product BEFORE add_product (cached-items bug billed undiscounted totals)
+    const VERSION  = '0.64.0';   // 0.64.0: Samsung category thumbnails now swap over the Store API (iOS app showed iPhone renders on Galaxy browses)
     // 0.59.0: the join popup now forwards the exact notice it showed the visitor, so the Club can
     //   record what someone was actually told. Klaviyo is cancelled in September and the popup is
     //   our biggest signup source; the Club will record these as joins, NOT marketing consent,
@@ -215,8 +215,83 @@ final class Galado_Club_Bridge {
         add_filter('woocommerce_get_variation_prices_hash', [__CLASS__, 'mys_prices_hash'], 20, 1);
         add_filter('woocommerce_coupon_is_valid_for_product', [__CLASS__, 'mys_block_tier_coupons'], 20, 3);
         add_action('woocommerce_single_product_summary', [__CLASS__, 'mys_pdp_prompt'], 15);
+        add_filter('woocommerce_product_get_image_id', [__CLASS__, 'samsung_store_api_image_id'], 20, 2);
         register_activation_hook(__FILE__, 'flush_rewrite_rules');
         register_deactivation_hook(__FILE__, 'flush_rewrite_rules');
+    }
+
+    /* ---------------------------------------------------------------------
+     * Samsung category thumbnails over the Store API
+     *
+     * Snippet #15 swaps a product's image on Samsung category PAGES so the
+     * shopper sees the render for their own model. It guards on template
+     * conditionals (is_product_category), which are false during a REST
+     * request, so the Store API — and therefore the iOS app — kept serving
+     * the iPhone hero on Galaxy category browses.
+     *
+     * This mirrors the swap for Store API list requests that are scoped to a
+     * single Galaxy category, using ONLY the pinned meta. The snippet's
+     * positional gallery fallback (second-to-last = Ultra) is unreliable —
+     * it is wrong for most recent products — so an unpinned product keeps its
+     * normal image rather than gambling on a wrong render.
+     * ------------------------------------------------------------------ */
+
+    /** 'ultra' | 'regular' | '' — resolved once per request from the Store API
+     *  category parameter. Null until computed. */
+    private static $samsung_ctx = null;
+
+    private static function samsung_context() {
+        if (null !== self::$samsung_ctx) {
+            return self::$samsung_ctx;
+        }
+        self::$samsung_ctx = '';
+        if (!defined('REST_REQUEST') || !REST_REQUEST) {
+            return self::$samsung_ctx;   // classic pages keep using snippet #15
+        }
+        $uri = isset($_SERVER['REQUEST_URI']) ? (string) $_SERVER['REQUEST_URI'] : '';
+        if (false === strpos($uri, '/wc/store/')) {
+            return self::$samsung_ctx;
+        }
+        $query = [];
+        $parts = wp_parse_url($uri);
+        if (empty($parts['query'])) {
+            return self::$samsung_ctx;
+        }
+        parse_str($parts['query'], $query);
+        $raw = isset($query['category']) ? $query['category'] : '';
+        if ('' === $raw || is_array($raw)) {
+            return self::$samsung_ctx;   // unscoped list: leave images alone
+        }
+        // A multi-category browse spans models, so no single render is right.
+        $ids = array_filter(array_map('trim', explode(',', (string) $raw)));
+        if (1 !== count($ids)) {
+            return self::$samsung_ctx;
+        }
+        $ref  = reset($ids);
+        $term = is_numeric($ref)
+            ? get_term((int) $ref, 'product_cat')
+            : get_term_by('slug', $ref, 'product_cat');
+        if (!$term || is_wp_error($term)) {
+            return self::$samsung_ctx;
+        }
+        $slug = strtolower($term->slug);
+        if (0 !== strpos($slug, 'galaxy-')) {
+            return self::$samsung_ctx;
+        }
+        self::$samsung_ctx = (false !== strpos($slug, 'ultra')) ? 'ultra' : 'regular';
+        return self::$samsung_ctx;
+    }
+
+    /** Swap in the pinned Galaxy render while listing a single Galaxy category. */
+    public static function samsung_store_api_image_id($image_id, $product) {
+        $mode = self::samsung_context();
+        if ('' === $mode || !($product instanceof WC_Product)) {
+            return $image_id;
+        }
+        $id  = $product->get_parent_id() ?: $product->get_id();
+        $key = ('ultra' === $mode) ? '_galado_samsung_ultra_id' : '_galado_samsung_regular_id';
+        $pinned = (int) get_post_meta($id, $key, true);
+        return $pinned > 0 ? $pinned : $image_id;
     }
 
     private static function is_pos_order($order) {
