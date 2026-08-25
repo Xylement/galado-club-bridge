@@ -1395,7 +1395,25 @@ final class Galado_Club_Bridge {
                 }
                 $existing = email_exists($email);
                 if ($existing) {
-                    return ['ok' => true, 'status' => 'exists', 'user_id' => (int) $existing];
+                    // Enrich, never overwrite: a walk-in "create" at the POS often hits an
+                    // email that already has a store account (Club member, past web buyer).
+                    // This branch used to return untouched, so the phone typed at the
+                    // counter was dropped and the member stayed unfindable by phone search
+                    // (billing_phone empty). Fill ONLY blank fields; existing data wins.
+                    $fill = [
+                        'billing_phone'      => preg_replace('/[^0-9+\-\s]/', '', sanitize_text_field((string) $request->get_param('phone'))),
+                        'billing_first_name' => sanitize_text_field((string) $request->get_param('first_name')),
+                        'billing_last_name'  => sanitize_text_field((string) $request->get_param('last_name')),
+                    ];
+                    $filled = [];
+                    foreach ($fill as $meta_key => $value) {
+                        $value = trim((string) $value);
+                        if ('' !== $value && '' === trim((string) get_user_meta($existing, $meta_key, true))) {
+                            update_user_meta($existing, $meta_key, $value);
+                            $filled[] = $meta_key;
+                        }
+                    }
+                    return ['ok' => true, 'status' => 'exists', 'user_id' => (int) $existing, 'filled' => $filled];
                 }
                 if (!function_exists('wc_create_new_customer')) {
                     return new WP_Error('no_woocommerce', 'WooCommerce not active', ['status' => 501]);
@@ -1407,7 +1425,7 @@ final class Galado_Club_Bridge {
                 // set-password link per the store's registration setting.
                 $first = sanitize_text_field((string) $request->get_param('first_name'));
                 $last  = sanitize_text_field((string) $request->get_param('last_name'));
-                $phone = sanitize_text_field((string) $request->get_param('phone'));
+                $phone = preg_replace('/[^0-9+\-\s]/', '', sanitize_text_field((string) $request->get_param('phone')));
                 $full  = trim("$first $last");
                 $create_args = [];
                 if ($first !== '') { $create_args['first_name'] = $first; }
