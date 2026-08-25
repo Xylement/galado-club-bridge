@@ -17,7 +17,7 @@ push-to-Xylement/galado-club-bridge (WP Git Sync), NOT the zips in this folder
 (the v0.2.x zips are obsolete manual-upload relics — do not deploy them).
 
 == Changelog ==
-= 0.63.0 =
+= 0.64.2 =
 * provision-customer now enriches EXISTING accounts: blank billing phone/name are
   filled from the values typed at the POS (existing data is never overwritten).
   Previously the exists branch returned untouched, so counter-entered phones were

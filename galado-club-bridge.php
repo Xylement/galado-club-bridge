@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.64.1
+ * Version: 0.64.2
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
-    const VERSION  = '0.64.1';   // 0.64.1: Samsung thumbnails also cover multi-model browses (the app's Samsung tile) — non-Ultra, matching the web parent page
+    const VERSION  = '0.64.2';   // 0.64.2: provision-customer enriches existing accounts (blank-only billing phone/name from POS)
     // 0.59.0: the join popup now forwards the exact notice it showed the visitor, so the Club can
     //   record what someone was actually told. Klaviyo is cancelled in September and the popup is
     //   our biggest signup source; the Club will record these as joins, NOT marketing consent,
