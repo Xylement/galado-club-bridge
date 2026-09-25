@@ -1441,9 +1441,10 @@ final class Galado_Club_Bridge {
         });
     }
 
-    /** WooCommerce's unpaid-order sweep only cancels checkout-created orders, and /app-order sets no
-     *  created_via. Opt in the ones holding redeemed credits, so they are cancelled after the
-     *  hold-stock window like a website checkout and return_app_credits() gives the points back. */
+    /** WooCommerce's unpaid-order sweep cancels only checkout-created orders in 10.5.3, the version
+     *  this store runs; from 10.6 core also sweeps store-api ones. /app-order sets no created_via, so
+     *  it is skipped either way. Opt in the ones holding redeemed credits, so they are cancelled after
+     *  the hold-stock window like a website checkout and return_app_credits() gives the points back. */
     public static function cancel_unpaid_app_order($cancel, $order) {
         if ($cancel || !($order instanceof WC_Order)) {
             return $cancel;
