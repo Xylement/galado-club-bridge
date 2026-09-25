@@ -143,6 +143,21 @@ check('an RM basket converts at 1', isset($cfg['rate']) ? (float) $cfg['rate'] :
 check('no CURCY rate: no meter at all rather than a wrong bar', $meter('SGD', 0.0, 71.50), '');
 galado_test_currency('MYR', 1.0);
 
+echo "-- bug 7: /app-stats sums revenue in RM, each order at its own rate\n";
+new WC_Order(['id' => 601, 'total' => '100.00', 'created' => time() - 3600]);
+new WC_Order(['id' => 602, 'currency' => 'SGD', 'total' => '40.00', 'created' => time() - 7200,
+    'meta' => ['wmc_order_info' => galado_test_wmc(['SGD' => 0.4])]]);
+new WC_Order(['id' => 603, 'currency' => 'SGD', 'total' => '50.00', 'created' => time() - 60 * 86400]);
+$GLOBALS['__get_orders'] = function ($args) {
+    return isset($args['created_via']) ? [602] : [601, 602, 603];
+};
+$B::rest_routes();
+$stats = call_user_func($GLOBALS['__routes']['/app-stats']['callback']);
+check('orders counted once each', $stats['orders'], 3);
+check('revenue RM100 + S$40 at 0.40 = RM200 (the S$50 order has no rate and adds nothing)', $stats['revenue'], 200.0);
+check('30-day window', [$stats['orders_30d'], $stats['revenue_30d']], [2, 200.0]);
+check('and the order it could not convert is reported, not hidden', isset($stats['unconverted']) ? $stats['unconverted'] : null, 1);
+
 @unlink($errlog);
 echo "\n{$GLOBALS['__pass']} passed, {$GLOBALS['__fail']} failed\n";
 exit($GLOBALS['__fail'] > 0 ? 1 : 0);

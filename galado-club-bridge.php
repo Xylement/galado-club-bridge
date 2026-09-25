@@ -2750,12 +2750,19 @@ final class Galado_Club_Bridge {
                 $revenue = 0.0;
                 $d30     = 0;
                 $rev30   = 0.0;
+                $unconverted = 0;
                 foreach ($ids as $id) {
                     $order = wc_get_order($id);
                     if (!$order) {
                         continue;
                     }
-                    $total    = (float) $order->get_total();
+                    // SPEC-4 bug 7: revenue in RM, each order at its own recorded rate. A foreign
+                    // order with no rate still counts as an order, adds no revenue, and is reported.
+                    $total = self::order_amount_in_base($order, $order->get_total());
+                    if (null === $total) {
+                        $unconverted++;
+                        $total = 0.0;
+                    }
                     $revenue += $total;
                     $created  = $order->get_date_created();
                     if ($created && $created->getTimestamp() >= $cut) {
@@ -2768,6 +2775,7 @@ final class Galado_Club_Bridge {
                     'revenue'     => round($revenue, 2),
                     'orders_30d'  => $d30,
                     'revenue_30d' => round($rev30, 2),
+                    'unconverted' => $unconverted,
                 ];
             },
         ]);
