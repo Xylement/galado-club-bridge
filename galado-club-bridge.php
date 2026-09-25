@@ -1191,12 +1191,17 @@ final class Galado_Club_Bridge {
         }
     }
 
+    /** RM discount winback_discount() gave this request's cart. The fee is in the cart's currency; the
+     *  balance it spends is RM, so this is what capture_winback() stamps on the order. */
+    private static $winback_rm = 0.0;
+
     /**
      * Reactivation win-back discount. Auto-applies the member's unlocked Club RM (from user meta,
      * pushed by the Club) as a negative fee, capped at RM10 per RM50 of cart so margin is protected.
      * For EXISTING customers (the whole point is bringing them back), so no new-customer gate.
      */
     public static function winback_discount($cart) {
+        self::$winback_rm = 0.0;
         if ((is_admin() && !defined('DOING_AJAX')) || !function_exists('WC') || !is_user_logged_in()) {
             return;
         }
@@ -1216,12 +1221,22 @@ final class Galado_Club_Bridge {
             return;
         }
         $subtotal = (float) $cart->get_subtotal();
-        $by_cart  = floor($subtotal / self::WINBACK_MIN) * self::WINBACK_STEP;
+        // SPEC-4 bug 3: the balance and its RM10-per-RM50 rule are RM; the cart may not be. Steps are
+        // counted against the RM50 converted into the cart's currency, and the RM discount is charged
+        // converted the same way (the straight CURCY rate the welcome fee uses). RM carts unchanged.
+        $step_min = self::to_request_currency(self::WINBACK_MIN);
+        if ($step_min <= 0) {
+            return;
+        }
+        $by_cart  = floor($subtotal / $step_min) * self::WINBACK_STEP;
         $discount = min($avail, $by_cart);
         if ($discount <= 0) {
             return;
         }
-        $cart->add_fee(sprintf(__('GALADO Club reward: RM%d off', 'galado-club'), $discount), -1 * $discount, false);
+        $amount = self::to_request_currency($discount);
+        self::$winback_rm = $discount;
+        // capture_winback() matches the "GALADO Club reward" prefix; only the amount follows the currency.
+        $cart->add_fee('GALADO Club reward: ' . self::money_label($amount) . ' off', -1 * $amount, false);
     }
 
     /** Stamp the win-back discount actually applied onto the order, so payment can consume it once. */
@@ -1236,7 +1251,9 @@ final class Galado_Club_Bridge {
             }
         }
         if ($applied > 0) {
-            $order->update_meta_data('_galado_winback_applied', $applied);
+            // In RM, the unit consume_winback() debits and winback_reserved() holds: the fee is in the
+            // cart's currency, the RM figure is what winback_discount() worked out for this same cart.
+            $order->update_meta_data('_galado_winback_applied', self::$winback_rm > 0 ? self::$winback_rm : $applied);
         }
     }
 

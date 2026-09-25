@@ -41,6 +41,35 @@ $GLOBALS['__options']['wc_points_rewards_earn_points_ratio'] = '0:0';
 check('a misconfigured ratio still leaves WooCommerce its own figure', $B::points_earned_on_paid_amount(12, 102), 12);
 $GLOBALS['__options']['wc_points_rewards_earn_points_ratio'] = '1:2';
 
+echo "-- bug 3: the win-back fee converts into the cart's currency; its RM stays RM on the order\n";
+$GLOBALS['__user_id'] = 7;
+$winback = function ($subtotal, $avail = 20) use ($B) {
+    $GLOBALS['__user_meta'][7] = ['_galado_winback_rm' => $avail];
+    $cart = WC()->cart;
+    $cart->fees = [];
+    $cart->subtotal = $subtotal;
+    $B::winback_discount($cart);
+    $order = new WC_Order(['id' => 200]);
+    $B::capture_winback($order);
+    $fee = $cart->fees ? $cart->fees[0] : null;
+    return [$fee ? $fee->name : null, $fee ? $fee->amount : null, $order->get_meta('_galado_winback_applied')];
+};
+galado_test_currency('MYR', 1.0);
+check('MYR RM120 cart: RM20 off, labelled as before, RM20 stamped',
+    $winback(120.0), ['GALADO Club reward: RM20 off', -20.0, 20.0]);
+galado_test_currency('SGD', 0.31317);
+check('SGD S$37.58 cart (RM120): two steps, S$6.26 off, RM20 stamped for consume_winback',
+    $winback(37.58), ['GALADO Club reward: S$6.26 off', -6.26, 20.0]);
+check('SGD S$120 cart: still RM20 of discount, never S$20',
+    $winback(120.0), ['GALADO Club reward: S$6.26 off', -6.26, 20.0]);
+check('SGD cart under the converted RM50 step: nothing', $winback(15.0), [null, null, '']);
+check('a RM10 balance caps it: S$3.13', $winback(100.0, 10), ['GALADO Club reward: S$3.13 off', -3.13, 10.0]);
+galado_test_currency('JPY', 38.868, 0);
+check('zero-decimal JPY 4,664 cart (RM120): JPY 777 off, RM20 stamped',
+    $winback(4664.0), ['GALADO Club reward: JPY 777 off', -777.0, 20.0]);
+$GLOBALS['__user_id'] = 0;
+galado_test_currency('MYR', 1.0);
+
 @unlink($errlog);
 echo "\n{$GLOBALS['__pass']} passed, {$GLOBALS['__fail']} failed\n";
 exit($GLOBALS['__fail'] > 0 ? 1 : 0);
