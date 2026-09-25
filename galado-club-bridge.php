@@ -167,6 +167,17 @@ final class Galado_Club_Bridge {
         // Consume the applied win-back RM once the order is paid (idempotent per order).
         add_action('woocommerce_order_status_processing', [__CLASS__, 'consume_winback'], 20, 1);
         add_action('woocommerce_order_status_completed', [__CLASS__, 'consume_winback'], 20, 1);
+        // SPEC-4 G4: Shopping Credits /app-order takes when it creates the pending order go back if
+        // that order is cancelled (WooCommerce cancels it once unpaid past the hold-stock window, see
+        // cancel_unpaid_app_order), fails, or is fully refunded; a failed order paid after all takes
+        // them again. One flag per order, so no transition can move them twice.
+        add_action('woocommerce_order_status_cancelled', [__CLASS__, 'return_app_credits'], 20, 1);
+        add_action('woocommerce_order_status_failed', [__CLASS__, 'return_app_credits'], 20, 1);
+        add_action('woocommerce_order_status_refunded', [__CLASS__, 'return_app_credits'], 20, 1);
+        add_action('woocommerce_order_status_processing', [__CLASS__, 'retake_app_credits'], 20, 1);
+        add_action('woocommerce_order_status_completed', [__CLASS__, 'retake_app_credits'], 20, 1);
+        add_action('woocommerce_order_status_on-hold', [__CLASS__, 'retake_app_credits'], 20, 1);
+        add_filter('woocommerce_cancel_unpaid_order', [__CLASS__, 'cancel_unpaid_app_order'], 10, 2);
         // 0.64.11: most accounts were created from past guest buyers' emails and carry no phone,
         // so the POS phone search could not find them. A paid order now copies its phone onto
         // the buyer's account when the account has none (blank-only, never overwrites).
@@ -1344,6 +1355,63 @@ final class Galado_Club_Bridge {
         }
         $order->update_meta_data('_galado_winback_consumed', '1');
         $order->save();
+    }
+
+    /** The Shopping Credits /app-order took for this order (_galado_app_credits_points) and the
+     *  account they came from: [points, user id], or [0, 0] when there is nothing to move. */
+    private static function app_credits($order) {
+        $points = (int) $order->get_meta('_galado_app_credits_points');
+        if ($points <= 0 || !class_exists('WC_Points_Rewards_Manager')) {
+            return [0, 0];
+        }
+        $uid = (int) $order->get_user_id();
+        if (!$uid) {
+            $u   = get_user_by('email', $order->get_billing_email());
+            $uid = $u ? (int) $u->ID : 0;
+        }
+        return [$points, $uid];
+    }
+
+    /** Give back the credits an /app-order took, once: it was cancelled (unpaid past the hold window
+     *  included), failed, or was fully refunded. Paid and still paid, it never runs. */
+    public static function return_app_credits($order_id) {
+        $order = wc_get_order($order_id);
+        if (!$order || '1' === (string) $order->get_meta('_galado_app_credits_returned')) {
+            return;
+        }
+        list($points, $uid) = self::app_credits($order);
+        if (!$points || !$uid) {
+            return;
+        }
+        WC_Points_Rewards_Manager::increase_points($uid, $points, 'galado-app-redemption-returned', null, $order->get_id());
+        $order->update_meta_data('_galado_app_credits_returned', '1');
+        $order->save();
+    }
+
+    /** A failed order whose credits went back and that is then paid anyway (the shopper retries on
+     *  the pay page) takes them again, once, so the discount they bought is never also kept as points. */
+    public static function retake_app_credits($order_id) {
+        $order = wc_get_order($order_id);
+        if (!$order || '1' !== (string) $order->get_meta('_galado_app_credits_returned')) {
+            return;
+        }
+        list($points, $uid) = self::app_credits($order);
+        if (!$points || !$uid) {
+            return;
+        }
+        WC_Points_Rewards_Manager::decrease_points($uid, $points, 'galado-app-redemption', null, $order->get_id());
+        $order->delete_meta_data('_galado_app_credits_returned');
+        $order->save();
+    }
+
+    /** WooCommerce's unpaid-order sweep only cancels checkout-created orders, and /app-order sets no
+     *  created_via. Opt in the ones holding redeemed credits, so they are cancelled after the
+     *  hold-stock window like a website checkout and return_app_credits() gives the points back. */
+    public static function cancel_unpaid_app_order($cancel, $order) {
+        if ($cancel || !($order instanceof WC_Order)) {
+            return $cancel;
+        }
+        return '1' === (string) $order->get_meta('_galado_app_order') && (int) $order->get_meta('_galado_app_credits_points') > 0;
     }
 
     /** True if this shopper has a prior paid order (logged-in, or guest matched by billing email). */

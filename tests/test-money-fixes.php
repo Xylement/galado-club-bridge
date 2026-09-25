@@ -70,6 +70,39 @@ check('zero-decimal JPY 4,664 cart (RM120): JPY 777 off, RM20 stamped',
 $GLOBALS['__user_id'] = 0;
 galado_test_currency('MYR', 1.0);
 
+echo "-- bug 4: app Shopping Credits come back once when the order is cancelled, fails or is fully refunded\n";
+$GLOBALS['__users']['guestpay@example.com'] = new WP_User(9, 'guestpay@example.com');
+$app = function ($id, $user = 7, $points = 500, $email = 'app@example.com') {
+    return new WC_Order(['id' => $id, 'user_id' => $user, 'billing_email' => $email,
+        'meta' => ['_galado_app_order' => '1', '_galado_app_credits_points' => (string) $points]]);
+};
+$log = function () { $l = WC_Points_Rewards_Manager::$log; WC_Points_Rewards_Manager::$log = []; return $l; };
+$app(401);
+$B::return_app_credits(401);
+$B::return_app_credits(401);
+check('cancelled (unpaid past the hold window): 500 back to user 7, once', $log(), [['+', 7, 500, 'galado-app-redemption-returned', 401]]);
+$app(402);
+$B::return_app_credits(402);  // failed
+$B::retake_app_credits(402);  // the shopper retries and pays after all
+$B::retake_app_credits(402);  // completed later
+$B::return_app_credits(402);  // then fully refunded
+check('failed, then paid, then fully refunded: back, taken again, back',
+    $log(), [['+', 7, 500, 'galado-app-redemption-returned', 402], ['-', 7, 500, 'galado-app-redemption', 402], ['+', 7, 500, 'galado-app-redemption-returned', 402]]);
+$app(403);
+$B::retake_app_credits(403);  // processing
+$B::retake_app_credits(403);  // completed
+check('a paid order that stays paid returns nothing', $log(), []);
+new WC_Order(['id' => 404, 'user_id' => 7, 'meta' => ['_galado_app_order' => '1']]);
+$B::return_app_credits(404);
+check('an app order that redeemed no credits: nothing to return', $log(), []);
+$app(405, 0, 120, 'guestpay@example.com');
+$B::return_app_credits(405);
+check('an order without a customer id returns to the account that owns the billing email', $log(), [['+', 9, 120, 'galado-app-redemption-returned', 405]]);
+check('WooCommerce may cancel an unpaid app order that holds credits', $B::cancel_unpaid_app_order(false, $app(406)), true);
+check('but not an app order without credits (unchanged)',
+    $B::cancel_unpaid_app_order(false, new WC_Order(['id' => 407, 'meta' => ['_galado_app_order' => '1']])), false);
+check('checkout orders keep WooCommerce\'s own answer', $B::cancel_unpaid_app_order(true, new WC_Order(['id' => 408])), true);
+
 @unlink($errlog);
 echo "\n{$GLOBALS['__pass']} passed, {$GLOBALS['__fail']} failed\n";
 exit($GLOBALS['__fail'] > 0 ? 1 : 0);
