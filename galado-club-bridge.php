@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.64.2
+ * Version: 0.64.11
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -82,7 +82,12 @@ final class Galado_Club_Bridge {
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
     const WELCOME30_AMOUNT = 30; // RM off a Club member's first order (signed welcome token)
-    const WELCOME30_MIN    = 120;// min cart subtotal (RM) for the Club welcome offer
+    const WELCOME30_MIN    = 120;// min cart subtotal (RM) for the Club welcome offer (legacy WEB token)
+    // iOS app launch (galado-app-launch/HANDOVER-WEB-DEV.md section 3, 15 Sep 2026): the RM30
+    // moves to the app. An `appwelcome` token (Club mint, same HMAC as `welcome`) is accepted
+    // ONLY on app checkouts, with this lower minimum. The legacy `welcome` cookie path keeps
+    // WELCOME30_MIN until the last web token expires (15 Oct 2026).
+    const APP_WELCOME_MIN  = 100;
     // Reactivation win-back: an auto-applied discount for EXISTING customers who unlocked RM off
     // in the Club (RM10 per RM50 of cart). Amount lives in user meta _galado_winback_rm (+ expiry),
     // pushed by the Club; consumed on order payment. Protects margin via the min-cart ratio.
@@ -127,6 +132,10 @@ final class Galado_Club_Bridge {
         // order with add-ons.
         add_filter('wc_points_rewards_points_earned_for_purchase', [__CLASS__, 'points_earned_on_paid_amount'], 20, 2);
         add_action('rest_api_init', [__CLASS__, 'rest_routes']);
+        // SGD parity (17 Sep 2026): /app-order and its quote run under the currency the app asks
+        // for. CURCY only registers its product-price hooks at init 99-100, and only when the
+        // request's currency is not the base, so the pin must happen before that.
+        add_action('init', [__CLASS__, 'pin_app_order_currency'], 1);
         // Two-way account link: a new galado.com.my registration also creates the Club member.
         add_action('user_register', [__CLASS__, 'on_user_register'], 20, 1);
         add_action('transition_comment_status', [__CLASS__, 'on_comment_transition'], 10, 3);
@@ -158,6 +167,11 @@ final class Galado_Club_Bridge {
         // Consume the applied win-back RM once the order is paid (idempotent per order).
         add_action('woocommerce_order_status_processing', [__CLASS__, 'consume_winback'], 20, 1);
         add_action('woocommerce_order_status_completed', [__CLASS__, 'consume_winback'], 20, 1);
+        // 0.64.11: most accounts were created from past guest buyers' emails and carry no phone,
+        // so the POS phone search could not find them. A paid order now copies its phone onto
+        // the buyer's account when the account has none (blank-only, never overwrites).
+        add_action('woocommerce_order_status_processing', [__CLASS__, 'sync_member_phone_from_order'], 30, 1);
+        add_action('woocommerce_order_status_completed', [__CLASS__, 'sync_member_phone_from_order'], 30, 1);
         // Cart-page tier meter for signed-in members (ports the iOS cart projection card).
         // Priority 20 puts it BELOW Points & Rewards, which renders its earn message at 15 and
         // the "Use Shopping Credit" prompt at 16. Credits are something the shopper can act on
@@ -659,14 +673,14 @@ final class Galado_Club_Bridge {
      * (b64url() is the pre-existing helper below — do not add another; a duplicate declaration
      * is a parse fatal.)
      */
-    private static function verify_welcome_token($token, $email = '') {
+    private static function verify_welcome_token($token, $email = '', $prefixes = ['welcome']) {
         $secret = self::sso_secret();
         if ('' === $secret || !$token) {
             return false;
         }
         $parts = explode('.', (string) $token);
         $n = count($parts);
-        if ((4 !== $n && 5 !== $n) || 'welcome' !== $parts[0]) {
+        if ((4 !== $n && 5 !== $n) || !in_array($parts[0], $prefixes, true)) {
             return false;
         }
         $sig     = $parts[$n - 1];
@@ -687,6 +701,312 @@ final class Galado_Club_Bridge {
             return hash_equals($parts[2], $bind);
         }
         return !(defined('GALADO_WELCOME_STRICT') && GALADO_WELCOME_STRICT);
+    }
+
+    /** Currencies the app may transact in (SPEC-SGD-PARITY.md section 4). */
+    const APP_CURRENCIES = ['MYR', 'SGD'];
+
+    /** The request currency for /app-order and /app-order/quote, read from the JSON body before
+     *  CURCY initialises. Missing = MYR (builds before 1.0.4 send none). An invalid code pins
+     *  nothing here; the route itself answers 400. */
+    public static function pin_app_order_currency() {
+        $uri = (string) ($_SERVER['REQUEST_URI'] ?? '');
+        if (false === strpos($uri, 'galado-club/v1/app-order')) {
+            return;
+        }
+        $body = json_decode((string) file_get_contents('php://input'), true);
+        $cur  = is_array($body) ? strtoupper(trim((string) ($body['currency'] ?? 'MYR'))) : 'MYR';
+        if (in_array($cur, self::APP_CURRENCIES, true)) {
+            $_COOKIE['wmc_current_currency'] = $cur;
+        }
+    }
+
+    /** The currency CURCY is pricing this request in (the store base when CURCY is off). */
+    private static function current_currency_code() {
+        if (class_exists('WOOMULTI_CURRENCY_Data')) {
+            return (string) WOOMULTI_CURRENCY_Data::get_ins()->get_current_currency();
+        }
+        return (string) get_option('woocommerce_currency', 'MYR');
+    }
+
+    /** An RM amount in the request's currency at CURCY's rate, WITHOUT beauty rounding: the same
+     *  straight conversion CURCY applies to shipping (RM30 -> S$12.00). Used for every RM figure
+     *  the bridge owns: welcome amount and minimum, add-ons, Shopping Credits, shipping rules. */
+    private static function to_request_currency($rm) {
+        $rm = (float) $rm;
+        if (!function_exists('wmc_get_price') || self::current_currency_code() === (string) get_option('woocommerce_currency', 'MYR')) {
+            return $rm;
+        }
+        return round((float) wmc_get_price($rm, false, true), wc_get_price_decimals());
+    }
+
+    /** "RM30" / "S$12" for fee labels; the "GALADO Club welcome" PREFIX never changes (the Club's
+     *  webhook and the app both match on it), only the visible amount follows the currency. */
+    private static function money_label($amount) {
+        $code = self::current_currency_code();
+        $sym  = ['MYR' => 'RM', 'SGD' => 'S$', 'USD' => '$'][$code] ?? ($code . ' ');
+        $amount = round((float) $amount, 2);
+        return $sym . ((floor($amount) == $amount) ? (string) (int) $amount : number_format($amount, 2, '.', ''));
+    }
+
+    /**
+     * Price an /app-order body without creating an order. Mirrors the route step by step: PWP lines
+     * at the bundles-quote unit, other lines at the product price CURCY gives this request,
+     * add-ons, the app welcome (items subtotal vs the converted minimum), the coupon (WooCommerce's
+     * own WC_Discounts on an in-memory order that is never saved), Shopping Credits, and shipping
+     * by the zone rules. Returns amounts in the request currency.
+     */
+    private static function app_order_quote(array $p) {
+        $lines   = is_array($p['lines'] ?? null) ? $p['lines'] : [];
+        $billing = is_array($p['billing'] ?? null) ? $p['billing'] : [];
+        $email   = sanitize_email((string) ($billing['email'] ?? ''));
+        if (!count($lines) || !$email) {
+            return new WP_Error('bad_request', 'lines and billing.email required', ['status' => 400]);
+        }
+        $cur = strtoupper(trim((string) ($p['currency'] ?? 'MYR')));
+        if (!in_array($cur, self::APP_CURRENCIES, true) || self::current_currency_code() !== $cur) {
+            return new WP_Error('bad_currency', 'currency must be MYR or SGD', ['status' => 400]);
+        }
+        $dp = wc_get_price_decimals();
+
+        $pwp_map = [];
+        $pwp_quotes = is_array($p['pwp_quotes'] ?? null) ? $p['pwp_quotes'] : [];
+        if ($pwp_quotes && class_exists('GALADO_Bundles_App')) {
+            $claimed = [];
+            foreach ($pwp_quotes as $q) {
+                if (!is_array($q)) continue;
+                $q['claimed'] = array_values(array_unique(array_merge(array_map('strval', (array) ($q['claimed'] ?? [])), $claimed)));
+                $quote = GALADO_Bundles_App::quote($q);
+                if (empty($quote['ok'])) {
+                    return new WP_Error('bad_request', 'bundle_quote: ' . (string) ($quote['message'] ?? 'invalid'), ['status' => 400]);
+                }
+                foreach ((array) $quote['lines'] as $ql) {
+                    $pwp_map[(int) $ql['product_id'] . '|' . (int) $ql['variation_id']][] = ['unit' => (float) $ql['unit'], 'qty' => (int) $ql['qty']];
+                    if (!empty($ql['pwp']) && !empty($ql['circle'])) {
+                        $claimed[] = (string) $ql['circle'];
+                    }
+                }
+            }
+        }
+
+        $scratch = new WC_Order(); // in memory only, for WC_Discounts; never saved
+        $scratch->set_billing_email($email);
+        $out_lines = [];
+        $items = 0.0;
+        $qty_total = 0;
+        foreach ($lines as $l) {
+            $pid = absint($l['product_id'] ?? 0);
+            $vid = absint($l['variation_id'] ?? 0);
+            $qty = max(1, absint($l['quantity'] ?? 1));
+            $product = wc_get_product($vid ?: $pid);
+            if (!$product || !$product->is_purchasable()) {
+                return new WP_Error('bad_request', 'unknown or unpurchasable product ' . ($vid ?: $pid), ['status' => 400]);
+            }
+            if (!$vid && $product->is_type('variable')) {
+                return new WP_Error('bad_request', 'variation_id required for variable product ' . $pid, ['status' => 400]);
+            }
+            $key = $pid . '|' . $vid;
+            if (!empty($pwp_map[$key]) && (int) $pwp_map[$key][0]['qty'] === $qty) {
+                $unit = (float) array_shift($pwp_map[$key])['unit'];
+            } else {
+                $unit = (float) $product->get_price();
+            }
+            $line = round($unit * $qty, $dp);
+            $items += $line;
+            $qty_total += $qty;
+            $item = new WC_Order_Item_Product();
+            $item->set_product($product);
+            $item->set_quantity($qty);
+            $item->set_subtotal((string) $line);
+            $item->set_total((string) $line);
+            $scratch->add_item($item);
+            $out_lines[] = ['product_id' => $pid, 'variation_id' => $vid, 'quantity' => $qty, 'unit' => round($unit, $dp), 'total' => $line];
+        }
+
+        $fees = [];
+        $addon_rm = (float) ($p['addon_total'] ?? 0);
+        $addon = ($addon_rm > 0 && $addon_rm < 10000) ? self::to_request_currency($addon_rm) : 0.0;
+        if ($addon > 0) {
+            $fees[] = ['name' => 'Customisation add-ons', 'total' => $addon];
+        }
+        $welcome_token = (string) ($p['welcome_token'] ?? '');
+        if ('' !== $welcome_token
+            && preg_match('/^appwelcome\.[A-Za-z0-9._-]{10,400}$/', $welcome_token)
+            && self::verify_welcome_token($welcome_token, $email, ['appwelcome'])
+            && !self::has_app_order($email)
+            && $items >= self::to_request_currency(self::APP_WELCOME_MIN)) {
+            $w = self::to_request_currency(self::WELCOME30_AMOUNT);
+            $fees[] = ['name' => 'GALADO Club welcome: ' . self::money_label($w) . ' off your first order', 'total' => -$w];
+        }
+
+        $discount = 0.0;
+        $free_coupon = false;
+        $coupon_code = strtoupper(sanitize_text_field((string) ($p['coupon'] ?? '')));
+        if ('' !== $coupon_code) {
+            $coupon = new WC_Coupon($coupon_code);
+            $disc = new WC_Discounts($scratch);
+            $ok = $disc->apply_coupon($coupon);
+            if (is_wp_error($ok)) {
+                return new WP_Error('bad_coupon', $ok->get_error_message(), ['status' => 400]);
+            }
+            $discount = round((float) array_sum($disc->get_discounts_by_item()), $dp);
+            $free_coupon = (bool) $coupon->get_free_shipping();
+        }
+
+        $credits_points = absint($p['credits_points'] ?? 0);
+        if ($credits_points > 0) {
+            $user = get_user_by('email', $email);
+            if (!class_exists('WC_Points_Rewards_Manager') || !$user) {
+                return new WP_Error('bad_request', 'credits unavailable for this account', ['status' => 400]);
+            }
+            if ($credits_points > (int) WC_Points_Rewards_Manager::get_users_points($user->ID)) {
+                return new WP_Error('insufficient_points', 'not enough Shopping Credits', ['status' => 409]);
+            }
+            $fees[] = ['name' => 'Shopping Credits redeemed', 'total' => -self::to_request_currency(round($credits_points / 10, 2))];
+        }
+
+        $rate = self::app_order_shipping_rate(
+            ['country' => sanitize_text_field((string) ($billing['country'] ?? 'MY')), 'state' => sanitize_text_field((string) ($billing['state'] ?? '')),
+             'postcode' => sanitize_text_field((string) ($billing['postcode'] ?? '')), 'city' => sanitize_text_field((string) ($billing['city'] ?? '')),
+             'address' => '', 'address_2' => ''],
+            $items + $addon, $discount, $qty_total, $free_coupon
+        );
+        $shipping = $rate ? (float) $rate['cost'] : 0.0;
+        $fees_total = array_sum(array_column($fees, 'total'));
+        $total = max(0.0, round($items - $discount + $fees_total + $shipping, $dp));
+        return [
+            'currency'       => $cur,
+            'lines'          => $out_lines,
+            'items_subtotal' => round($items, $dp),
+            'discount_total' => $discount,
+            'fees'           => $fees,
+            'shipping'       => $rate ? ['title' => $rate['title'], 'method_id' => $rate['method_id'], 'total' => $shipping] : null,
+            'total'          => $total,
+        ];
+    }
+
+    /**
+     * Shipping for an order built outside the cart (the app's /app-order), by the store's OWN zone
+     * rules (SPEC-SGD-PARITY.md B4, 17 Sep 2026). WooCommerce's free_shipping method reads
+     * WC()->cart, which does not exist on this REST route, so the rules are evaluated here from each
+     * enabled method's saved settings, the same way the checkout evaluates them:
+     *   free_shipping  requires '' | min_amount | coupon | either | both; min compared against the
+     *                  items subtotal less coupon discounts unless ignore_discounts is 'yes';
+     *   flat_rate      its cost setting ([qty] and [cost] placeholders supported; anything else
+     *                  unsupported is skipped and logged rather than guessed).
+     * The cheapest available rate wins, which is what the checkout lands on for these zones.
+     * Returns ['method_id','instance_id','title','cost'] or null when the zone offers nothing.
+     */
+    private static function app_order_shipping_rate($destination, $items_subtotal, $discount_total, $qty, $free_shipping_coupon) {
+        if (!class_exists('WC_Shipping_Zones')) {
+            return null;
+        }
+        $zone = WC_Shipping_Zones::get_zone_matching_package(['destination' => $destination]);
+        if (!$zone) {
+            return null;
+        }
+        $decimals = wc_get_price_decimals();
+        $best = null;
+        foreach ($zone->get_shipping_methods(true) as $method) {
+            $cost = null;
+            if ('free_shipping' === $method->id) {
+                $requires = (string) $method->get_option('requires', '');
+                // RAW setting, converted once here. get_option() is already converted by CURCY's
+                // woocommerce_shipping_free_shipping_instance_option filter under a non-base
+                // currency, so converting that value again made RM150 read as S$24 (17 Sep 2026).
+                $min_raw  = isset($method->instance_settings['min_amount']) ? $method->instance_settings['min_amount'] : $method->get_option('min_amount', 0);
+                $min      = self::to_request_currency((float) $min_raw);
+                $basis    = ('yes' === $method->get_option('ignore_discounts', 'no')) ? $items_subtotal : ($items_subtotal - $discount_total);
+                $has_min  = round($basis, $decimals) >= $min;
+                $ok = ('' === $requires) ? true
+                    : (('min_amount' === $requires) ? $has_min
+                    : (('coupon' === $requires) ? $free_shipping_coupon
+                    : (('either' === $requires) ? ($has_min || $free_shipping_coupon)
+                    : (('both' === $requires) ? ($has_min && $free_shipping_coupon) : false))));
+                if ($ok) {
+                    $cost = 0.0;
+                }
+            } elseif ('flat_rate' === $method->id) {
+                $raw  = trim((string) $method->get_option('cost', ''));
+                $expr = str_replace(['[qty]', '[cost]'], [(string) (int) $qty, (string) (float) $items_subtotal], $raw);
+                if ('' === $expr) {
+                    $cost = 0.0;
+                } elseif (preg_match('/^[0-9.\s+*\/()-]+$/', $expr) && is_numeric(trim($expr))) {
+                    $cost = self::to_request_currency((float) $expr);
+                } elseif (preg_match('/^[0-9.\s+*\/()-]+$/', $expr)) {
+                    // simple arithmetic only, e.g. "10 + 2 * [qty]" after substitution
+                    if (!class_exists('WC_Eval_Math')) {
+                        include_once WC()->plugin_path() . '/includes/libraries/class-wc-eval-math.php';
+                    }
+                    $cost = self::to_request_currency((float) WC_Eval_Math::evaluate($expr));
+                } else {
+                    error_log('[galado-club-bridge] app-order shipping: unsupported flat_rate cost on instance ' . $method->get_instance_id());
+                    continue;
+                }
+            } else {
+                continue; // local pickup and anything else: not deliverable from the app
+            }
+            if (null !== $cost && (null === $best || $cost < $best['cost'])) {
+                $best = [
+                    'method_id'   => $method->id,
+                    'instance_id' => (int) $method->get_instance_id(),
+                    'title'       => (string) $method->get_title(),
+                    'cost'        => round(max(0.0, $cost), $decimals),
+                ];
+            }
+        }
+        return $best;
+    }
+
+    /** Is the current request an APP checkout: a Store API request (the app is the only Store API
+     *  client) that also identifies itself, by the `X-Galado-App` header or a `GaladoApp` user
+     *  agent? Everything else, including the normal web cart and checkout, is not. */
+    private static function is_app_checkout() {
+        $uri = (string) ($_SERVER['REQUEST_URI'] ?? '');
+        $rest = (defined('REST_REQUEST') && REST_REQUEST) || false !== strpos($uri, 'rest_route=');
+        if (!$rest || false === strpos($uri, 'wc/store')) {
+            return false;
+        }
+        if (!empty($_SERVER['HTTP_X_GALADO_APP'])) {
+            return true;
+        }
+        return false !== stripos((string) ($_SERVER['HTTP_USER_AGENT'] ?? ''), 'GaladoApp');
+    }
+
+    /** The app's welcome token, sent as a header on every Store API call (never a cookie). */
+    private static function app_welcome_header_token() {
+        $t = (string) ($_SERVER['HTTP_X_GALADO_WELCOME'] ?? '');
+        return preg_match('/^appwelcome\.[A-Za-z0-9._-]{10,400}$/', $t) ? $t : '';
+    }
+
+    /** The qualify rule for the APP offer (settled 15 Sep 2026): every member's FIRST app order,
+     *  existing web customers included. So the only disqualifier is a prior app order for this
+     *  shopper: a Store API checkout (created_via store-api) or a bridge /app-order (meta), in a
+     *  paid or completed state. The Club applies the same predicate from its own records. */
+    private static function has_app_order($email) {
+        if (!function_exists('wc_get_orders')) {
+            return false;
+        }
+        $args = ['limit' => 20, 'return' => 'ids', 'status' => ['wc-completed', 'wc-processing']];
+        if (is_user_logged_in()) {
+            $args['customer_id'] = get_current_user_id();
+        } else {
+            $email = strtolower(trim((string) $email));
+            if ('' === $email) {
+                return false;
+            }
+            $args['billing_email'] = $email;
+        }
+        foreach (wc_get_orders($args) as $order_id) {
+            $order = wc_get_order($order_id);
+            if (!$order) {
+                continue;
+            }
+            if ('store-api' === $order->get_created_via() || '1' === (string) $order->get_meta('_galado_app_order', true)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** The email this checkout resolves to: the account email when logged in, otherwise the
@@ -736,11 +1056,15 @@ final class Galado_Club_Bridge {
         if (!function_exists('wc_get_orders')) {
             return false;
         }
+        // No meta_query: WooCommerce's order data store rejects it (doing_it_wrong) and silently
+        // runs the query WITHOUT the condition, so every shopper with any prior order in any
+        // status (pending, failed, cancelled) was treated as having used the intro discount
+        // (found 6 Sep 2026). Fetch the shopper's recent orders and check the meta per order,
+        // which behaves the same on post storage and on HPOS.
         $args = [
-            'limit'      => 1,
-            'return'     => 'ids',
-            'status'     => array_keys(wc_get_order_statuses()),
-            'meta_query' => [['key' => '_galado_intro_discount', 'compare' => 'EXISTS']],
+            'limit'  => 20,
+            'return' => 'ids',
+            'status' => array_keys(wc_get_order_statuses()),
         ];
         if (is_user_logged_in()) {
             $args['customer_id'] = get_current_user_id();
@@ -751,7 +1075,13 @@ final class Galado_Club_Bridge {
             }
             $args['billing_email'] = $email;
         }
-        return !empty(wc_get_orders($args));
+        foreach (wc_get_orders($args) as $order_id) {
+            $order = wc_get_order($order_id);
+            if ($order && '' !== (string) $order->get_meta('_galado_intro_discount', true)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Stamp the intro discount actually applied onto the order at CREATION, so has_used_intro()
@@ -789,21 +1119,39 @@ final class Galado_Club_Bridge {
         if ((is_admin() && !defined('DOING_AJAX')) || !function_exists('WC')) {
             return;
         }
+        $email    = self::current_checkout_email();
+        $subtotal = (float) $cart->get_subtotal();
+        // APP path (15 Sep 2026): an `appwelcome` header token on an app Store API checkout,
+        // email-bound, for a shopper with no prior app order, RM100 minimum. Evaluated BEFORE the
+        // existing-customer gate on purpose: existing web customers qualify for their first app
+        // order. Anywhere else an appwelcome token is ignored, so it can never leak to the web.
+        $app_token = self::app_welcome_header_token();
+        if ('' !== $app_token && self::is_app_checkout()) {
+            // B1 (17 Sep 2026): amount and minimum in the cart's currency. Under SGD the RM100/RM30
+            // rule was read as S$100/S$30, 2.5x the intended discount.
+            $amount = self::to_request_currency(self::WELCOME30_AMOUNT);
+            if (self::verify_welcome_token($app_token, $email, ['appwelcome'])
+                && !self::has_app_order($email)
+                && $subtotal >= self::to_request_currency(self::APP_WELCOME_MIN)) {
+                $cart->add_fee('GALADO Club welcome: ' . self::money_label($amount) . ' off your first order', -1 * $amount, false);
+            }
+            return;
+        }
         if (self::is_existing_customer() || self::has_used_intro()) {
             return;
         }
-        $email    = self::current_checkout_email();
-        $subtotal = (float) $cart->get_subtotal();
         if (!empty($_COOKIE['galado_welcome'])
             && self::verify_welcome_token(wp_unslash($_COOKIE['galado_welcome']), $email)
-            && $subtotal >= self::WELCOME30_MIN) {
-            $cart->add_fee(__('GALADO Club welcome: RM30 off your first order', 'galado-club'), -1 * self::WELCOME30_AMOUNT, false);
+            && $subtotal >= self::to_request_currency(self::WELCOME30_MIN)) {
+            $amount = self::to_request_currency(self::WELCOME30_AMOUNT);
+            $cart->add_fee('GALADO Club welcome: ' . self::money_label($amount) . ' off your first order', -1 * $amount, false);
             return;
         }
         if (!empty($_COOKIE['galado_ref'])
             && self::referral_code_valid(wp_unslash($_COOKIE['galado_ref']))
-            && $subtotal >= self::WELCOME_MIN) {
-            $cart->add_fee(__('Referral welcome: RM10 off your first order', 'galado-club'), -1 * self::WELCOME_AMOUNT, false);
+            && $subtotal >= self::to_request_currency(self::WELCOME_MIN)) {
+            $amount = self::to_request_currency(self::WELCOME_AMOUNT);
+            $cart->add_fee('Referral welcome: ' . self::money_label($amount) . ' off your first order', -1 * $amount, false);
         }
     }
 
@@ -897,6 +1245,32 @@ final class Galado_Club_Bridge {
     }
 
     /** On payment, subtract the applied win-back RM from the member's balance. Idempotent per order. */
+    /** Copy a paid order's billing phone onto the buyer's account when the account has none:
+     *  the order's customer for a logged-in order, else the account that owns the billing
+     *  email (a member who checked out as a guest). Blank-only: a saved number is never changed. */
+    public static function sync_member_phone_from_order($order_id) {
+        $order = wc_get_order($order_id);
+        if (!$order) {
+            return;
+        }
+        $phone = trim(preg_replace('/[^0-9+\-\s]/', '', (string) $order->get_billing_phone()));
+        if (strlen(preg_replace('/\D/', '', $phone)) < 8) {
+            return;
+        }
+        $uid = (int) $order->get_user_id();
+        if (!$uid) {
+            $email = (string) $order->get_billing_email();
+            $uid = $email ? (int) email_exists($email) : 0;
+        }
+        if (!$uid) {
+            return;
+        }
+        if (strlen(preg_replace('/\D/', '', (string) get_user_meta($uid, 'billing_phone', true))) >= 7) {
+            return;
+        }
+        update_user_meta($uid, 'billing_phone', $phone);
+    }
+
     public static function consume_winback($order_id) {
         $order = wc_get_order($order_id);
         if (!$order || $order->get_meta('_galado_winback_consumed')) {
@@ -1784,6 +2158,10 @@ final class Galado_Club_Bridge {
                 if (!count($lines) || !$email) {
                     return new WP_Error('bad_request', 'lines and billing.email required', ['status' => 400]);
                 }
+                $req_currency = strtoupper(trim((string) ($p['currency'] ?? 'MYR')));
+                if (!in_array($req_currency, self::APP_CURRENCIES, true) || self::current_currency_code() !== $req_currency) {
+                    return new WP_Error('bad_currency', 'currency must be MYR or SGD', ['status' => 400]);
+                }
                 // Staged PWP purchases (galado-bundles engine): the app sends
                 // its quote REQUESTS, never prices. Re-run the same server
                 // quote the PDP used and price matching lines from it — the
@@ -1810,7 +2188,13 @@ final class Galado_Club_Bridge {
                         }
                         foreach ((array) $quote['lines'] as $ql) {
                             $key = (int) $ql['product_id'] . '|' . (int) $ql['variation_id'];
-                            $pwp_map[$key][] = ['unit' => (float) $ql['unit'], 'qty' => (int) $ql['qty']];
+                            // S1 (17 Sep 2026): keep the RM `unit_base` (bundles v0.21+). `unit` is
+                            // already in the shopper's currency and CURCY converts again on read.
+                            $pwp_map[$key][] = [
+                                'unit'      => (float) $ql['unit'],
+                                'unit_base' => isset($ql['unit_base']) ? (float) $ql['unit_base'] : null,
+                                'qty'       => (int) $ql['qty'],
+                            ];
                             if (!empty($ql['pwp']) && !empty($ql['circle'])) {
                                 $claimed[] = (string) $ql['circle'];
                             }
@@ -1823,6 +2207,7 @@ final class Galado_Club_Bridge {
                 if (is_wp_error($order)) {
                     return $order;
                 }
+                $order->set_currency($req_currency);
                 foreach ($lines as $l) {
                     $pid = absint($l['product_id'] ?? 0);
                     $vid = absint($l['variation_id'] ?? 0);
@@ -1852,7 +2237,15 @@ final class Galado_Club_Bridge {
                     $pwp_key = $pid . '|' . $vid;
                     if (!empty($pwp_map[$pwp_key]) && (int) $pwp_map[$pwp_key][0]['qty'] === $qty) {
                         $entry = array_shift($pwp_map[$pwp_key]);
-                        $product->set_price((string) $entry['unit']);
+                        // S1 (owner TestFlight, 17 Sep 2026): write the RM figure and let CURCY convert
+                        // ONCE on read, with the same wmc_get_price the bundles quote used for `unit`,
+                        // so order line == quote line by construction. v0.64.7-0.64.9 wrote `unit`
+                        // (already S$) and relied on wmc_product_get_price_condition to stop a second
+                        // conversion; CURCY's VARIATION price hook never consults that filter, so every
+                        // PWP line was converted twice (orders 425323/425324). Under MYR unit_base ==
+                        // unit. A bundles build without unit_base only exists in MYR, where unit is RM.
+                        $base = null !== $entry['unit_base'] ? $entry['unit_base'] : $entry['unit'];
+                        $product->set_price((string) $base);
                     }
                     $item_id = $order->add_product($product, $qty);
                     if ($item_id && is_array($l['custom'] ?? null)) {
@@ -1877,13 +2270,35 @@ final class Galado_Club_Bridge {
                         $item->save();
                     }
                 }
-                $addon = (float) ($p['addon_total'] ?? 0);
-                if ($addon > 0 && $addon < 10000) {
+                $addon_rm = (float) ($p['addon_total'] ?? 0); // the app sends add-ons in RM
+                $addon    = ($addon_rm > 0 && $addon_rm < 10000) ? self::to_request_currency($addon_rm) : 0.0;
+                if ($addon > 0) {
                     $fee = new WC_Order_Item_Fee();
                     $fee->set_name('Customisation add-ons');
                     $fee->set_amount((string) $addon);
                     $fee->set_total((string) $addon);
                     $order->add_item($fee);
+                }
+                // App welcome RM30 on the customised/bundle path (15 Sep 2026). Same token, same
+                // rule and the SAME fee name as the cart path: the Club's webhook records the
+                // redemption by that prefix, and capture_first_order_discount() never runs here,
+                // so the intro meta is stamped by hand.
+                $welcome_token = (string) ($p['welcome_token'] ?? '');
+                if ('' !== $welcome_token
+                    && preg_match('/^appwelcome\.[A-Za-z0-9._-]{10,400}$/', $welcome_token)
+                    && self::verify_welcome_token($welcome_token, $email, ['appwelcome'])
+                    && !self::has_app_order($email)) {
+                    $order->calculate_totals(false);
+                    if ((float) $order->get_subtotal() >= self::to_request_currency(self::APP_WELCOME_MIN)) {
+                        $w_amount = self::to_request_currency(self::WELCOME30_AMOUNT);
+                        $wfee = new WC_Order_Item_Fee();
+                        $wfee->set_name('GALADO Club welcome: ' . self::money_label($w_amount) . ' off your first order');
+                        $wfee->set_amount((string) (-$w_amount));
+                        $wfee->set_total((string) (-$w_amount));
+                        $order->add_item($wfee);
+                        $order->add_meta_data('_galado_intro_discount', (string) $w_amount);
+                        $order->add_meta_data('_galado_intro_type', 'appwelcome');
+                    }
                 }
                 $user = get_user_by('email', $email);
                 // Coupon (tier codes etc.) — validated by Woo itself.
@@ -1908,12 +2323,12 @@ final class Galado_Club_Bridge {
                         $order->delete(true);
                         return new WP_Error('insufficient_points', 'not enough Shopping Credits', ['status' => 409]);
                     }
-                    $credits_rm = round($credits_points / 10, 2);
+                    $credits_value = self::to_request_currency(round($credits_points / 10, 2)); // 10 points = RM1
                     WC_Points_Rewards_Manager::decrease_points($user->ID, $credits_points, 'galado-app-redemption');
                     $credit_fee = new WC_Order_Item_Fee();
                     $credit_fee->set_name('Shopping Credits redeemed');
-                    $credit_fee->set_amount((string) (-$credits_rm));
-                    $credit_fee->set_total((string) (-$credits_rm));
+                    $credit_fee->set_amount((string) (-$credits_value));
+                    $credit_fee->set_total((string) (-$credits_value));
                     $order->add_item($credit_fee);
                     $order->add_meta_data('_galado_app_credits_points', (string) $credits_points);
                 }
@@ -1935,10 +2350,50 @@ final class Galado_Club_Bridge {
                     $order->set_customer_id($user->ID);
                 }
                 $order->add_meta_data('_galado_app_order', '1');
+                // B4 (17 Sep 2026): a shipping line by the zone rules for the delivery address.
+                // Before this, customised and bundle orders to Singapore paid no shipping at all.
+                // The free-shipping threshold uses what the website's cart subtotal would hold:
+                // items (PWP prices included) plus customisation add-ons, less coupon discounts.
+                $ship_qty = 0;
+                foreach ($order->get_items('line_item') as $li) {
+                    $ship_qty += (int) $li->get_quantity();
+                }
+                $free_coupon = false;
+                foreach ($order->get_coupon_codes() as $code) {
+                    $cp = new WC_Coupon($code);
+                    if ($cp->get_free_shipping()) {
+                        $free_coupon = true;
+                    }
+                }
+                $rate = self::app_order_shipping_rate(
+                    ['country' => $addr['country'], 'state' => $addr['state'], 'postcode' => $addr['postcode'],
+                     'city' => $addr['city'], 'address' => $addr['address_1'], 'address_2' => $addr['address_2']],
+                    (float) $order->get_subtotal() + $addon,
+                    (float) $order->get_discount_total(),
+                    $ship_qty,
+                    $free_coupon
+                );
+                if ($rate) {
+                    $ship = new WC_Order_Item_Shipping();
+                    $ship->set_method_title($rate['title']);
+                    $ship->set_method_id($rate['method_id']);
+                    $ship->set_instance_id($rate['instance_id']);
+                    $ship->set_total((string) $rate['cost']);
+                    $order->add_item($ship);
+                }
                 if ($pwp_saving > 0) {
                     // Same analytics key the web cart engine records, so bundle
                     // reporting spans both channels.
                     $order->add_meta_data('_galado_bundle_saving', (string) round($pwp_saving, 2));
+                }
+                // The same rate record CURCY writes on website checkouts (symbol.php
+                // add_order_currency_info), so the Club's coin maths and CURCY's reports can convert
+                // this order back to RM at the rate it was placed under.
+                if (class_exists('WOOMULTI_CURRENCY_Data')) {
+                    $wmc      = WOOMULTI_CURRENCY_Data::get_ins();
+                    $wmc_info = $wmc->get_list_currencies();
+                    $wmc_info[$wmc->get_default_currency()]['is_main'] = 1;
+                    $order->update_meta_data('wmc_order_info', $wmc_info);
                 }
                 $order->calculate_totals();
                 $order->save();
@@ -1946,7 +2401,41 @@ final class Galado_Club_Bridge {
                     'order_id'  => $order->get_id(),
                     'order_key' => $order->get_order_key(),
                     'pay_url'   => self::app_pay_url($order, $user),
+                    'currency'  => $order->get_currency(),
+                    'total'     => (float) $order->get_total(),
                 ];
+            },
+        ]);
+
+        // GET /currency-rates (SPEC-SGD-PARITY 5.4): CURCY's own rates for the app currencies, so the
+        // Club converts RM payloads (add-on option prices, the welcome offer, Shopping Credits) at
+        // exactly the store's setting instead of a copy that could drift. Straight rate only; the
+        // Club applies it without beauty rounding, like the bridge does for add-ons and fees.
+        register_rest_route('galado-club/v1', '/currency-rates', [
+            'methods'             => 'GET',
+            'permission_callback' => [__CLASS__, 'bridge_auth'],
+            'callback'            => function () {
+                $base = (string) get_option('woocommerce_currency', 'MYR');
+                $out  = [$base => ['rate' => 1.0, 'decimals' => wc_get_price_decimals()]];
+                if (class_exists('WOOMULTI_CURRENCY_Data')) {
+                    foreach (WOOMULTI_CURRENCY_Data::get_ins()->get_list_currencies() as $code => $c) {
+                        if (in_array($code, self::APP_CURRENCIES, true) && isset($c['rate']) && (float) $c['rate'] > 0) {
+                            $out[$code] = ['rate' => (float) $c['rate'], 'decimals' => (int) ($c['decimals'] ?? 2)];
+                        }
+                    }
+                }
+                return ['base' => $base, 'currencies' => $out];
+            },
+        ]);
+
+        // POST /app-order/quote (SPEC-SGD-PARITY 5.3): the /app-order body priced exactly as the
+        // order would be, WITHOUT creating anything, so the app shows the server's total before
+        // Place Order. Nothing is written: no order, no points deducted, no meta.
+        register_rest_route('galado-club/v1', '/app-order/quote', [
+            'methods'             => 'POST',
+            'permission_callback' => [__CLASS__, 'bridge_auth'],
+            'callback'            => function (WP_REST_Request $request) {
+                return self::app_order_quote((array) $request->get_json_params());
             },
         ]);
 
@@ -2191,16 +2680,25 @@ final class Galado_Club_Bridge {
                 $digits = preg_replace('/\D+/', '', $q);
                 $ids = [];
                 if (strlen($digits) >= 6 && strlen($digits) >= strlen($q) - 4) {
-                    // Mostly-numeric query → phone lookup. Match loosely on the trailing digits
-                    // so 0123456789 / +60123456789 / 012-345 6789 all hit the same row.
-                    $tail = substr($digits, -8);
-                    $ids = $wpdb->get_col($wpdb->prepare(
-                        "SELECT user_id FROM {$wpdb->usermeta}
-                          WHERE meta_key = 'billing_phone'
-                            AND REPLACE(REPLACE(REPLACE(REPLACE(meta_value,' ',''),'-',''),'+',''),'.','') LIKE %s
-                          LIMIT 10",
-                        '%' . $wpdb->esc_like($tail)
-                    ));
+                    // Mostly-numeric query → phone lookup on digits only, so every stored format
+                    // matches (+60 12-345 6789, 0123456789, 123456789, stray invisible characters).
+                    // The country code (60/65) and trunk 0 are dropped and the rest is matched
+                    // anywhere in the number, so a number that is still being typed already finds
+                    // its member. Dropping a prefix can only add candidates, never lose a match.
+                    $core = $digits;
+                    if (strlen($core) >= 8 && (0 === strpos($core, '60') || 0 === strpos($core, '65'))) {
+                        $core = substr($core, 2);
+                    }
+                    $core = ltrim($core, '0');
+                    if (strlen($core) >= 6) {
+                        $ids = $wpdb->get_col($wpdb->prepare(
+                            "SELECT user_id FROM {$wpdb->usermeta}
+                              WHERE meta_key = 'billing_phone'
+                                AND REGEXP_REPLACE(meta_value, '[^0-9]', '') LIKE %s
+                              LIMIT 10",
+                            '%' . $wpdb->esc_like($core) . '%'
+                        ));
+                    }
                 } else {
                     $like = '%' . $wpdb->esc_like($q) . '%';
                     $ids = $wpdb->get_col($wpdb->prepare(
@@ -2355,6 +2853,9 @@ final class Galado_Club_Bridge {
             'mys-collection' => '/collections/member-price/',
             'mys-stylink'    => '/product/stylink-metal-chain/',
             'mys-luna'       => '/product/luna-guard/',
+            // 9.9 Flash Sale (9 Sep 2026): the Club dashboard banner lands members on the
+            // sale page already signed in, so member pricing and the tier discount apply.
+            'flash-99'       => '/99-flash-sale/',
         ];
         return $map[$dest] ?? '';
     }
