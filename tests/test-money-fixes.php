@@ -103,6 +103,61 @@ check('but not an app order without credits (unchanged)',
     $B::cancel_unpaid_app_order(false, new WC_Order(['id' => 407, 'meta' => ['_galado_app_order' => '1']])), false);
 check('checkout orders keep WooCommerce\'s own answer', $B::cancel_unpaid_app_order(true, new WC_Order(['id' => 408])), true);
 
+echo "-- bug 4, atomic: one MySQL named lock per order, and the flag read fresh from the database inside it\n";
+$GLOBALS['__events'] = [];
+$app(420);
+$B::return_app_credits(420);
+check('the points move inside GET_LOCK and RELEASE_LOCK for that order',
+    $GLOBALS['__events'], ["SELECT GET_LOCK('gld_app_credits_420', 5)", '+points 500', "SELECT RELEASE_LOCK('gld_app_credits_420')"]);
+$log();
+$GLOBALS['__events'] = [];
+$B::return_app_credits(420);
+check('a second call takes the lock, finds the order claimed and moves nothing',
+    [$GLOBALS['__events'], $log()], [["SELECT GET_LOCK('gld_app_credits_420', 5)", "SELECT RELEASE_LOCK('gld_app_credits_420')"], []]);
+$app(421); // this process loaded the order...
+$GLOBALS['__db_meta'][421]['_galado_app_credits_returned'] = '1'; // ...then another gave the points back
+$B::return_app_credits(421);
+check('the stale copy in memory is not trusted: points already given back are not given twice', $log(), []);
+$app(422);
+$GLOBALS['__db_meta'][422]['_galado_app_credits_returned'] = '1'; // failed and returned by another process
+$B::retake_app_credits(422); // while this one records the payment with a stale copy
+check('a payment racing the return still takes the points again', $log(), [['-', 7, 500, 'galado-app-redemption', 422]]);
+check('and clears the flag where it is stored', isset($GLOBALS['__db_meta'][422]['_galado_app_credits_returned']), false);
+$app(423);
+$GLOBALS['__locks_elsewhere']['gld_app_credits_423'] = '0'; // GET_LOCK gave up after 5 s
+$GLOBALS['__events'] = [];
+$B::return_app_credits(423);
+$B::retake_app_credits(423);
+check('lock not had within 5 s: nothing moves, nothing is flagged, nothing is released',
+    [$log(), $GLOBALS['__events'], isset($GLOBALS['__db_meta'][423]['_galado_app_credits_returned'])],
+    [[], ["SELECT GET_LOCK('gld_app_credits_423', 5)", "SELECT GET_LOCK('gld_app_credits_423', 5)"], false]);
+check('and each attempt is logged with the order id, to retry by hand', [
+    substr_count((string) file_get_contents($errlog), '[galado-club-bridge] app_credits_not_moved order=423 action=return reason=lock_timeout'),
+    substr_count((string) file_get_contents($errlog), '[galado-club-bridge] app_credits_not_moved order=423 action=retake reason=lock_timeout'),
+], [1, 1]);
+$app(424);
+$GLOBALS['__locks_elsewhere']['gld_app_credits_424'] = null; // GET_LOCK error
+$B::return_app_credits(424);
+check('a GET_LOCK error counts as not having the lock', $log(), []);
+$app(425);
+WC_Points_Rewards_Manager::$fail = true;
+$GLOBALS['__events'] = [];
+$threw = false;
+try {
+    $B::return_app_credits(425);
+} catch (RuntimeException $e) {
+    $threw = true;
+}
+WC_Points_Rewards_Manager::$fail = false;
+check('Points & Rewards failing mid-move: the lock is still released and the order stays unclaimed',
+    [$threw, end($GLOBALS['__events']), isset($GLOBALS['__db_meta'][425]['_galado_app_credits_returned'])],
+    [true, "SELECT RELEASE_LOCK('gld_app_credits_425')", false]);
+new WC_Order(['id' => 426, 'user_id' => 7, 'meta' => ['_galado_app_order' => '1']]);
+$GLOBALS['__events'] = [];
+$B::return_app_credits(426);
+$B::retake_app_credits(426);
+check('an order that redeemed no credits takes no lock at all', $GLOBALS['__events'], []);
+
 echo "-- bug 6: the thank-you estimate and the cart tier meter are in RM\n";
 $thanks = function ($props) use ($B) {
     ob_start();

@@ -19,6 +19,9 @@ $GLOBALS['__user_id']   = 0;       // the signed-in user
 $GLOBALS['__user_meta'] = [];      // [uid][key] => value
 $GLOBALS['__users']     = [];      // email => WP_User
 $GLOBALS['__routes']    = [];      // register_rest_route captures
+$GLOBALS['__db_meta']   = [];      // order id => meta as stored in the database
+$GLOBALS['__events']    = [];      // lock queries and points moves, in order
+$GLOBALS['__locks_elsewhere'] = []; // named locks another process holds
 
 function add_action() {}
 function add_filter() {}
@@ -78,6 +81,7 @@ class WC_Order {
             $this->$k = $v;
         }
         $GLOBALS['__orders'][$this->id] = $this;
+        $GLOBALS['__db_meta'][$this->id] = $this->meta;
     }
     public function get_id() { return $this->id; }
     public function get_currency() { return $this->currency; }
@@ -87,8 +91,13 @@ class WC_Order {
     public function update_meta_data($key, $value) { $this->meta[$key] = $value; }
     public function add_meta_data($key, $value) { $this->meta[$key] = $value; }
     public function delete_meta_data($key) { unset($this->meta[$key]); }
-    public function save() { $this->saved++; return $this->id; }
-    public function save_meta_data() {}
+    public function save() { $this->saved++; $this->save_meta_data(); return $this->id; }
+    public function save_meta_data() { $GLOBALS['__db_meta'][$this->id] = $this->meta; }
+    public function read_meta_data($force_read = false) {
+        if ($force_read) {
+            $this->meta = isset($GLOBALS['__db_meta'][$this->id]) ? $GLOBALS['__db_meta'][$this->id] : [];
+        }
+    }
     public function get_user_id() { return $this->user_id; }
     public function get_customer_id() { return $this->user_id; }
     public function get_user() { return $this->user_id ? new WP_User($this->user_id, $this->billing_email) : false; }
@@ -98,9 +107,46 @@ class WC_Order {
 
 class WC_Points_Rewards_Manager {
     public static $log = [];
-    public static function increase_points($uid, $points, $type, $data = null, $order_id = null) { self::$log[] = ['+', $uid, $points, $type, $order_id]; }
-    public static function decrease_points($uid, $points, $type, $data = null, $order_id = null) { self::$log[] = ['-', $uid, $points, $type, $order_id]; }
+    public static $fail = false; // simulate Points & Rewards throwing mid-move
+    public static function increase_points($uid, $points, $type, $data = null, $order_id = null) { self::move('+', $uid, $points, $type, $order_id); }
+    public static function decrease_points($uid, $points, $type, $data = null, $order_id = null) { self::move('-', $uid, $points, $type, $order_id); }
+    private static function move($sign, $uid, $points, $type, $order_id) {
+        if (self::$fail) {
+            throw new RuntimeException('points store unavailable');
+        }
+        self::$log[] = [$sign, $uid, $points, $type, $order_id];
+        $GLOBALS['__events'][] = $sign . 'points ' . $points;
+    }
 }
+
+/** $wpdb for MySQL named locks only. A lock named in $GLOBALS['__locks_elsewhere'] is held by another
+ *  process: GET_LOCK answers its value there ('0' after the timeout, null for an error). */
+class Galado_Test_WPDB {
+    public $queries = [];
+    public function prepare($query, ...$args) {
+        $i = 0;
+        return preg_replace_callback('/%[sd]/', function ($m) use (&$i, $args) {
+            $v = $args[$i++];
+            return '%d' === $m[0] ? (string) (int) $v : "'" . addslashes((string) $v) . "'";
+        }, $query);
+    }
+    public function get_var($query) {
+        $this->log($query);
+        if (preg_match("/^SELECT GET_LOCK\('([^']+)', (\d+)\)$/", $query, $m)) {
+            return array_key_exists($m[1], $GLOBALS['__locks_elsewhere']) ? $GLOBALS['__locks_elsewhere'][$m[1]] : '1';
+        }
+        return null;
+    }
+    public function query($query) {
+        $this->log($query);
+        return 1;
+    }
+    private function log($query) {
+        $this->queries[] = $query;
+        $GLOBALS['__events'][] = $query;
+    }
+}
+$GLOBALS['wpdb'] = new Galado_Test_WPDB();
 
 class Galado_Test_Cart {
     public $subtotal = 0.0;

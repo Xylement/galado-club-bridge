@@ -1382,36 +1382,63 @@ final class Galado_Club_Bridge {
         return [$points, $uid];
     }
 
+    /**
+     * Move an /app-order's credits while holding a MySQL named lock for that order, deciding on the
+     * returned flag as stored in the database, not on a copy in memory or the object cache. Two
+     * processes changing the same order at once (the unpaid-order sweep and an admin cancel, a
+     * duplicate cron run) otherwise both see the order unclaimed and both move the points.
+     * $move($order, $points, $uid) runs only inside the lock. Without the lock within 5 s nothing
+     * moves and the order id is logged, to retry by hand.
+     */
+    private static function with_app_credits_lock($order_id, $action, $move) {
+        global $wpdb;
+        $order = wc_get_order($order_id);
+        if (!$order || (int) $order->get_meta('_galado_app_credits_points') <= 0) {
+            return; // no redeemed app credits on this order: nothing to lock for
+        }
+        $id   = (int) $order->get_id();
+        $lock = 'gld_app_credits_' . $id;
+        if ('1' !== (string) $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, 5)', $lock))) {
+            error_log('[galado-club-bridge] app_credits_not_moved order=' . $id . ' action=' . $action . ' reason=lock_timeout');
+            return;
+        }
+        try {
+            // Re-read through the order's own data store with the cache skipped: correct for posts
+            // storage (this store) and for HPOS alike.
+            $order->read_meta_data(true);
+            list($points, $uid) = self::app_credits($order);
+            if ($points && $uid) {
+                $move($order, $points, $uid);
+            }
+        } finally {
+            $wpdb->query($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $lock));
+        }
+    }
+
     /** Give back the credits an /app-order took, once: it was cancelled (unpaid past the hold window
      *  included), failed, or was fully refunded. Paid and still paid, it never runs. */
     public static function return_app_credits($order_id) {
-        $order = wc_get_order($order_id);
-        if (!$order || '1' === (string) $order->get_meta('_galado_app_credits_returned')) {
-            return;
-        }
-        list($points, $uid) = self::app_credits($order);
-        if (!$points || !$uid) {
-            return;
-        }
-        WC_Points_Rewards_Manager::increase_points($uid, $points, 'galado-app-redemption-returned', null, $order->get_id());
-        $order->update_meta_data('_galado_app_credits_returned', '1');
-        $order->save();
+        self::with_app_credits_lock($order_id, 'return', function ($order, $points, $uid) {
+            if ('1' === (string) $order->get_meta('_galado_app_credits_returned')) {
+                return; // already given back
+            }
+            WC_Points_Rewards_Manager::increase_points($uid, $points, 'galado-app-redemption-returned', null, $order->get_id());
+            $order->update_meta_data('_galado_app_credits_returned', '1');
+            $order->save();
+        });
     }
 
     /** A failed order whose credits went back and that is then paid anyway (the shopper retries on
      *  the pay page) takes them again, once, so the discount they bought is never also kept as points. */
     public static function retake_app_credits($order_id) {
-        $order = wc_get_order($order_id);
-        if (!$order || '1' !== (string) $order->get_meta('_galado_app_credits_returned')) {
-            return;
-        }
-        list($points, $uid) = self::app_credits($order);
-        if (!$points || !$uid) {
-            return;
-        }
-        WC_Points_Rewards_Manager::decrease_points($uid, $points, 'galado-app-redemption', null, $order->get_id());
-        $order->delete_meta_data('_galado_app_credits_returned');
-        $order->save();
+        self::with_app_credits_lock($order_id, 'retake', function ($order, $points, $uid) {
+            if ('1' !== (string) $order->get_meta('_galado_app_credits_returned')) {
+                return; // never given back, so nothing to take again
+            }
+            WC_Points_Rewards_Manager::decrease_points($uid, $points, 'galado-app-redemption', null, $order->get_id());
+            $order->delete_meta_data('_galado_app_credits_returned');
+            $order->save();
+        });
     }
 
     /** WooCommerce's unpaid-order sweep only cancels checkout-created orders, and /app-order sets no
