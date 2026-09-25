@@ -740,6 +740,42 @@ final class Galado_Club_Bridge {
         return round((float) wmc_get_price($rm, false, true), wc_get_price_decimals());
     }
 
+    /** The rate CURCY recorded on this order when it was placed (`wmc_order_info`), in order-currency
+     *  units per RM1: the only rate an order's RM value is ever read at (SPEC-4 G1), never today's.
+     *  CURCY prices with its fee inside `rate`; a snapshot that keeps the fee apart (`rate_fee`,
+     *  `rate_fee_type` fixed | percentage) has it folded in here, or the fee itself would earn. 1.0 for
+     *  an order in the store currency; null for a foreign order with no usable snapshot. */
+    private static function order_rate($order) {
+        $code = strtoupper((string) $order->get_currency());
+        if ('' === $code || strtoupper((string) get_option('woocommerce_currency', 'MYR')) === $code) {
+            return 1.0;
+        }
+        $info = $order->get_meta('wmc_order_info', true);
+        if (is_string($info)) {
+            $info = json_decode($info, true);
+        }
+        $c    = (is_array($info) && isset($info[$code]) && is_array($info[$code])) ? $info[$code] : [];
+        $rate = (float) ($c['rate'] ?? 0);
+        if ($rate <= 0) {
+            return null;
+        }
+        $fee = (float) ($c['rate_fee'] ?? $c['fee'] ?? 0);
+        if ($fee <= 0) {
+            return $rate;
+        }
+        return false !== stripos((string) ($c['rate_fee_type'] ?? $c['fee_type'] ?? ''), 'percent') ? $rate * (1 + $fee / 100) : $rate + $fee;
+    }
+
+    /** An amount in the order's own currency, in RM at the order's recorded rate; null without one,
+     *  never the raw foreign figure passed off as RM. */
+    private static function order_amount_in_base($order, $amount) {
+        $rate = self::order_rate($order);
+        if (null === $rate) {
+            return null;
+        }
+        return 1.0 === $rate ? (float) $amount : round((float) $amount / $rate, 2);
+    }
+
     /** "RM30" / "S$12" for fee labels; the "GALADO Club welcome" PREFIX never changes (the Club's
      *  webhook and the app both match on it), only the visible amount follows the currency. */
     private static function money_label($amount) {
@@ -2802,7 +2838,16 @@ final class Galado_Club_Bridge {
         if ($earn <= 0 || $per <= 0) {
             return $points; // misconfigured ratio: leave WooCommerce's value untouched
         }
-        $base = (float) $order->get_total() * ($earn / $per);
+        // SPEC-4 G4: points are RM money (10 points = RM1), so a foreign-currency order earns on its
+        // RM value at the rate CURCY recorded on it, never today's (an S$ total read as RM earned
+        // about 2.5x too few). MYR orders are unchanged. With no recorded rate it earns nothing here
+        // rather than points on the raw foreign figure, and the log says so to add them by hand.
+        $total = self::order_amount_in_base($order, $order->get_total());
+        if (null === $total) {
+            error_log('[galado-club-bridge] points: order ' . $order->get_id() . ' (' . $order->get_currency() . ') has no wmc_order_info rate; no Shopping Credits awarded');
+            return 0;
+        }
+        $base = $total * ($earn / $per);
         if ($base <= 0) {
             return 0;
         }
