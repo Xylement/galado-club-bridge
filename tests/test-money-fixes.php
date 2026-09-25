@@ -34,7 +34,8 @@ check('a 3% fee kept apart from the rate is folded in: S$48.50 = RM150.36, 75 po
 check('the order id alone works too', $B::points_earned_on_paid_amount(0, 102), 89);
 check('SGD with no recorded rate earns nothing, never points on the raw S$ figure',
     $B::points_earned_on_paid_amount(36, new WC_Order(['id' => 105, 'currency' => 'SGD', 'total' => '71.50'])), 0);
-check('and says so in the PHP error log', false !== strpos((string) file_get_contents($errlog), 'order 105'), true);
+check('and logs one greppable line saying so',
+    substr_count((string) file_get_contents($errlog), '[galado-club-bridge] points_not_awarded order=105 currency=SGD reason=no_rate paid=71.50'), 1);
 galado_test_currency('SGD', 0.31317);
 check("today's rate never stands in for the order's own", $B::points_earned_on_paid_amount(0, 102), 89);
 $GLOBALS['__options']['wc_points_rewards_earn_points_ratio'] = '0:0';

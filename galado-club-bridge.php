@@ -2974,10 +2974,13 @@ final class Galado_Club_Bridge {
         // SPEC-4 G4: points are RM money (10 points = RM1), so a foreign-currency order earns on its
         // RM value at the rate CURCY recorded on it, never today's (an S$ total read as RM earned
         // about 2.5x too few). MYR orders are unchanged. With no recorded rate it earns nothing here
-        // rather than points on the raw foreign figure, and the log says so to add them by hand.
+        // rather than points on the raw foreign figure, and logs one greppable line. Remedy by hand
+        // once the rate is known: credit round(paid / rate x the ratio) points through this bridge's
+        // POST /points/add (email, points).
         $total = self::order_amount_in_base($order, $order->get_total());
         if (null === $total) {
-            error_log('[galado-club-bridge] points: order ' . $order->get_id() . ' (' . $order->get_currency() . ') has no wmc_order_info rate; no Shopping Credits awarded');
+            error_log('[galado-club-bridge] points_not_awarded order=' . $order->get_id() . ' currency=' . $order->get_currency()
+                . ' reason=no_rate paid=' . $order->get_total());
             return 0;
         }
         $base = $total * ($earn / $per);
