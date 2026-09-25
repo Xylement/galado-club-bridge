@@ -103,6 +103,46 @@ check('but not an app order without credits (unchanged)',
     $B::cancel_unpaid_app_order(false, new WC_Order(['id' => 407, 'meta' => ['_galado_app_order' => '1']])), false);
 check('checkout orders keep WooCommerce\'s own answer', $B::cancel_unpaid_app_order(true, new WC_Order(['id' => 408])), true);
 
+echo "-- bug 6: the thank-you estimate and the cart tier meter are in RM\n";
+$thanks = function ($props) use ($B) {
+    ob_start();
+    $B::thankyou_block((new WC_Order($props))->get_id());
+    return (string) ob_get_clean();
+};
+galado_test_currency('SGD', 0.31317); // the buyer's own request: today's rate must not be used
+$html = $thanks(['id' => 301, 'currency' => 'SGD', 'total' => '71.50', 'shipping_total' => '12.00',
+    'billing_email' => 'sg@example.com', 'meta' => ['wmc_order_info' => galado_test_wmc(['SGD' => 0.4])]]);
+check('S$71.50 incl S$12 shipping at 0.40 promises ~149 coins, the figure it earns (was ~60)', false !== strpos($html, 'You just earned ~149 G-Coins!'), true);
+$html = $thanks(['id' => 302, 'currency' => 'SGD', 'total' => '71.50', 'shipping_total' => '12.00', 'billing_email' => 'sg@example.com']);
+check('no recorded rate: no coin promise', false === strpos($html, 'You just earned') && false !== strpos($html, 'Your GALADO Club is waiting'), true);
+galado_test_currency('MYR', 1.0);
+$html = $thanks(['id' => 303, 'total' => '149.00', 'billing_email' => 'my@example.com']);
+check('MYR RM149 unchanged: ~149', false !== strpos($html, 'You just earned ~149 G-Coins!'), true);
+
+$meter = function ($code, $rate, $basket) use ($B) {
+    galado_test_currency($code, $rate);
+    $GLOBALS['__user_id'] = 7;
+    WC()->cart->total = $basket;
+    ob_start();
+    $B::render_tier_meter();
+    $out = (string) ob_get_clean();
+    $GLOBALS['__user_id'] = 0;
+    return $out;
+};
+$out = $meter('SGD', 0.31317, 71.50);
+preg_match('/window\.GLD_TIER = (\{.*?\});\n/', $out, $m);
+$cfg = $m ? json_decode($m[1], true) : [];
+check('the meter carries the rate the basket converts at', isset($cfg['rate']) ? $cfg['rate'] : null, 0.31317);
+check('and the basket as the shopper sees it', isset($cfg['order']) ? $cfg['order'] : null, 71.5);
+check('the page divides the basket by that rate before adding it to RM lifetime spend',
+    false !== strpos($out, 'var order = basketTotal() / (+CFG.rate || 1);'), true);
+$out = $meter('MYR', 1.0, 149.0);
+preg_match('/window\.GLD_TIER = (\{.*?\});\n/', $out, $m);
+$cfg = $m ? json_decode($m[1], true) : [];
+check('an RM basket converts at 1', isset($cfg['rate']) ? (float) $cfg['rate'] : null, 1.0);
+check('no CURCY rate: no meter at all rather than a wrong bar', $meter('SGD', 0.0, 71.50), '');
+galado_test_currency('MYR', 1.0);
+
 @unlink($errlog);
 echo "\n{$GLOBALS['__pass']} passed, {$GLOBALS['__fail']} failed\n";
 exit($GLOBALS['__fail'] > 0 ? 1 : 0);

@@ -751,6 +751,16 @@ final class Galado_Club_Bridge {
         return round((float) wmc_get_price($rm, false, true), wc_get_price_decimals());
     }
 
+    /** CURCY's straight rate for this request's currency, unrounded (units per RM1): 1.0 in RM, null
+     *  when CURCY cannot give one. */
+    private static function current_rate() {
+        if (!function_exists('wmc_get_price') || self::current_currency_code() === (string) get_option('woocommerce_currency', 'MYR')) {
+            return 1.0;
+        }
+        $rate = (float) wmc_get_price(1, false, true);
+        return $rate > 0 ? $rate : null;
+    }
+
     /** The rate CURCY recorded on this order when it was placed (`wmc_order_info`), in order-currency
      *  units per RM1: the only rate an order's RM value is ever read at (SPEC-4 G1), never today's.
      *  CURCY prices with its fee inside `rate`; a snapshot that keeps the fee apart (`rate_fee`,
@@ -1765,7 +1775,10 @@ final class Galado_Club_Bridge {
         if (!$order) {
             return;
         }
-        $net  = max(0.0, (float) $order->get_total() - (float) $order->get_shipping_total());
+        // SPEC-4 bug 6: coins are RM-based, so the estimate converts at the order's own recorded rate
+        // (an S$71.50 order promised ~60 coins and earned 149). With no rate it promises nothing:
+        // the Club queues such an order rather than crediting it.
+        $net  = self::order_amount_in_base($order, max(0.0, (float) $order->get_total() - (float) $order->get_shipping_total()));
         $user = $order->get_user(); // WP_User, or false for guest checkout
         $mult = ['silver' => 1.0, 'gold' => 1.2, 'diamond' => 1.5, 'black' => 2.0];
         $tier = 'silver';
@@ -1776,7 +1789,7 @@ final class Galado_Club_Bridge {
                 $tier = $summary['tier'];
             }
         }
-        $coins_est = (int) round($net * (isset($mult[$tier]) ? $mult[$tier] : 1.0));
+        $coins_est = null === $net ? 0 : (int) round($net * (isset($mult[$tier]) ? $mult[$tier] : 1.0));
         $earned    = $coins_est >= 1;
 
         echo '<section style="border:1px solid #ECECEA;border-radius:20px;padding:24px;background:#FFFFFF;margin:24px 0;font-family:\'Inter\',sans-serif;color:#111111;box-shadow:0 4px 16px rgba(17,17,17,.06);">';
@@ -3561,6 +3574,12 @@ if(st&&st.snooze&&Date.now()<st.snooze){showChip()}else{setTimeout(openAll,7000)
         if (!apply_filters('galado_tier_meter_public', true) && !current_user_can('manage_woocommerce')) {
             return;
         }
+        // SPEC-4 bug 6: the basket is in the shopper's currency, the ladder and lifetime spend in RM.
+        // The page converts the basket at CURCY's straight rate; without one there is no honest bar.
+        $rate = self::current_rate();
+        if (!$rate) {
+            return;
+        }
         // This hook runs on the cart page, where the cart is genuinely loaded, so the basket
         // total taken here is authoritative for the first paint.
         $cart_total = (function_exists('WC') && WC()->cart) ? (float) WC()->cart->get_total('edit') : 0.0;
@@ -3568,6 +3587,7 @@ if(st&&st.snooze&&Date.now()<st.snooze){showChip()}else{setTimeout(openAll,7000)
             'rest'   => esc_url_raw(rest_url('galado-club/v1/my-tier')),
             'nonce'  => wp_create_nonce('wp_rest'),
             'order'  => $cart_total,
+            'rate'   => $rate,
             'dec'    => function_exists('wc_get_price_decimal_separator') ? wc_get_price_decimal_separator() : '.',
             'sep'    => function_exists('wc_get_price_thousand_separator') ? wc_get_price_thousand_separator() : ',',
             // Within this many RM of the next tier the headline switches to the near-miss
@@ -3733,7 +3753,8 @@ window.GLD_TIER = <?php echo wp_json_encode($cfg); ?>;
   }
 
   function paint(d) {
-    var order = basketTotal();
+    // The basket is in the shopper's currency; the ladder and lifetime spend are RM.
+    var order = basketTotal() / (+CFG.rate || 1);
     var life = +d.lifetime || 0, projected = life + order;
     var now = tierAt(life), next = null, reachedTier = tierAt(projected);
     ladder.forEach(function (t) { if (next === null && projected < t.min) next = t; });
