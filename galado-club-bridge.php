@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.64.11
+ * Version: 0.64.12
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -16,6 +16,27 @@
 
 if (!defined('ABSPATH')) {
     exit;
+}
+
+if ( ! function_exists( 'galado_strip_emoji' ) ) {
+	/**
+	 * GALADO personalisation rule (owner, 26 Sep 2026): no emoji. Same rule as the iOS app
+	 * (galado-ios PrintableText.swift). Returns [clean text, whether anything was removed].
+	 * Removes a whole character (grapheme) when it holds a code point above U+FFFF, U+FE0F or
+	 * U+20E3, or starts with a BMP Emoji_Presentation code point. Letters in any script, digits,
+	 * punctuation and text symbols (bullet, heart, star) stay. Trim the result yourself.
+	 */
+	function galado_strip_emoji( string $s ): array {
+		$bad = '/[\x{10000}-\x{10FFFF}\x{FE0F}\x{20E3}]|^[\x{231A}-\x{231B}\x{23E9}-\x{23EC}\x{23F0}\x{23F3}\x{25FD}-\x{25FE}\x{2614}-\x{2615}\x{2648}-\x{2653}\x{267F}\x{2693}\x{26A1}\x{26AA}-\x{26AB}\x{26BD}-\x{26BE}\x{26C4}-\x{26C5}\x{26CE}\x{26D4}\x{26EA}\x{26F2}-\x{26F3}\x{26F5}\x{26FA}\x{26FD}\x{2705}\x{270A}-\x{270B}\x{2728}\x{274C}\x{274E}\x{2753}-\x{2755}\x{2757}\x{2795}-\x{2797}\x{27B0}\x{27BF}\x{2B1B}-\x{2B1C}\x{2B50}\x{2B55}]/u';
+		$out = '';
+		$removed = false;
+		if ( preg_match_all( '/\X/u', $s, $m ) ) {
+			foreach ( $m[0] as $g ) {
+				if ( preg_match( $bad, $g ) ) { $removed = true; } else { $out .= $g; }
+			}
+		}
+		return array( $out, $removed );
+	}
 }
 
 final class Galado_Club_Bridge {
@@ -749,6 +770,71 @@ final class Galado_Club_Bridge {
         return $sym . ((floor($amount) == $amount) ? (string) (int) $amount : number_format($amount, 2, '.', ''));
     }
 
+    /** Owner, 26 Sep 2026: no emoji in personalisation. The order-item tables are MyISAM
+     *  utf8mb3, so WordPress refuses any meta row holding a 4-byte character and returns
+     *  nothing: the name vanishes from the order while the rest of the line saves (orders
+     *  426534, 426260, 425903). iOS 1.0.8 strips emoji as the customer types; this guard is
+     *  what protects every build from 1.0.2 to 1.0.7 that still sends them. The Club forwards
+     *  a 400 message and the app shows it at Place Order. */
+    const EMOJI_MESSAGE = "Emoji can't be printed on your case. Please remove this item from your cart and add it again with the name typed without emoji.";
+
+    /** WP_Error when any personalisation value carries an emoji, else null. Uses the shared
+     *  helper (galado-app-launch/assets/no-emoji), the same rule and test cases as the app. */
+    private static function custom_emoji_error(array $lines) {
+        foreach ($lines as $l) {
+            if (!is_array($l) || !is_array($l['custom'] ?? null)) {
+                continue;
+            }
+            foreach ($l['custom'] as $c) {
+                $v = is_array($c) ? (string) ($c['value'] ?? '') : '';
+                if ($v === '') {
+                    continue;
+                }
+                list(, $removed) = galado_strip_emoji($v);
+                if ($removed) {
+                    return new WP_Error('emoji_not_printable', self::EMOJI_MESSAGE, ['status' => 400]);
+                }
+            }
+        }
+        return null;
+    }
+
+    /** The label of the first personalisation the caller sent that is NOT on the saved line,
+     *  else null. Read straight from the table: a value the column cannot hold is dropped by
+     *  WordPress without an error, and the in-memory item still believes it was written.
+     *  A value of only spaces counts as lost too, because the sanitiser empties it and the
+     *  write loop then skips it. Underscore labels are excluded: those are refused on purpose
+     *  (server-minted fulfilment keys), which is a refusal, not a loss. */
+    private static function missing_custom_label($item_id, array $custom) {
+        global $wpdb;
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT meta_key, meta_value FROM {$wpdb->prefix}woocommerce_order_itemmeta WHERE order_item_id = %d",
+                (int) $item_id
+            ),
+            ARRAY_A
+        );
+        $saved = [];
+        foreach ((array) $rows as $r) {
+            $saved[(string) $r['meta_key']][] = (string) $r['meta_value'];
+        }
+        foreach ($custom as $c) {
+            if (!is_array($c)) {
+                continue;
+            }
+            $k = sanitize_text_field((string) ($c['label'] ?? ''));
+            if ($k === '' || strpos($k, '_') === 0 || (string) ($c['value'] ?? '') === '') {
+                continue;
+            }
+            $k = mb_substr($k, 0, 80);
+            $v = mb_substr(sanitize_textarea_field((string) $c['value']), 0, 500);
+            if ($v === '' || !isset($saved[$k]) || !in_array($v, $saved[$k], true)) {
+                return $k;
+            }
+        }
+        return null;
+    }
+
     /**
      * Price an /app-order body without creating an order. Mirrors the route step by step: PWP lines
      * at the bundles-quote unit, other lines at the product price CURCY gives this request,
@@ -766,6 +852,10 @@ final class Galado_Club_Bridge {
         $cur = strtoupper(trim((string) ($p['currency'] ?? 'MYR')));
         if (!in_array($cur, self::APP_CURRENCIES, true) || self::current_currency_code() !== $cur) {
             return new WP_Error('bad_currency', 'currency must be MYR or SGD', ['status' => 400]);
+        }
+        $emoji = self::custom_emoji_error($lines);
+        if ($emoji) {
+            return $emoji;
         }
         $dp = wc_get_price_decimals();
 
@@ -2162,6 +2252,10 @@ final class Galado_Club_Bridge {
                 if (!in_array($req_currency, self::APP_CURRENCIES, true) || self::current_currency_code() !== $req_currency) {
                     return new WP_Error('bad_currency', 'currency must be MYR or SGD', ['status' => 400]);
                 }
+                $emoji = self::custom_emoji_error($lines);
+                if ($emoji) {
+                    return $emoji;
+                }
                 // Staged PWP purchases (galado-bundles engine): the app sends
                 // its quote REQUESTS, never prices. Re-run the same server
                 // quote the PDP used and price matching lines from it — the
@@ -2268,6 +2362,19 @@ final class Galado_Club_Bridge {
                             $item->add_meta_data(mb_substr($k, 0, 80), mb_substr($v, 0, 500), false);
                         }
                         $item->save();
+                        // Read the rows back before promising anything: this is the silent drop
+                        // that lost three customers' names. No pay link for a half-saved order.
+                        $lost = self::missing_custom_label($item_id, $l['custom']);
+                        if (null !== $lost) {
+                            $order->update_status('cancelled', sprintf(
+                                'Bridge: personalisation "%s" did not save on item #%d, so the order was cancelled instead of billed. Order-item tables are utf8mb3 (SPEC-NO-EMOJI-NAMES).',
+                                $lost, (int) $item_id
+                            ));
+                            return new WP_Error('custom_meta_lost', sprintf(
+                                'We could not save "%s" on one of your items. Please remove that item from your cart and add it again.',
+                                $lost
+                            ), ['status' => 400]);
+                        }
                     }
                 }
                 $addon_rm = (float) ($p['addon_total'] ?? 0); // the app sends add-ons in RM
