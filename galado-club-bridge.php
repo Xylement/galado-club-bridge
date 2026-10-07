@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.64.13
+ * Version: 0.64.14
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -962,6 +962,11 @@ final class Galado_Club_Bridge {
             $items += $line;
             $qty_total += $qty;
             $item = new WC_Order_Item_Product();
+            // WC_Discounts keys an order's lines by item id, and an unsaved item's id is 0, so on this
+            // never-saved order each line replaced the one before it and a coupon priced the LAST line
+            // only (DIAM10D on RM219: RM2.33 instead of RM21.90, 7 Oct 2026). A temporary id per line,
+            // far above any real order item, keeps them apart; the scratch order is never saved.
+            $item->set_id(PHP_INT_MAX - count($out_lines));
             $item->set_product($product);
             $item->set_quantity($qty);
             $item->set_subtotal((string) $line);
