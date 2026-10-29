@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.64.15
+ * Version: 0.64.16
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -43,6 +43,9 @@ final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
     const VERSION  = '0.64.2';   // 0.64.2: provision-customer enriches existing accounts (blank-only billing phone/name from POS)
+    // 0.64.16: the article sign-ups follow the popup (owner, 7 Oct 2026): the article card and the iPhone 18/Duo
+    //   article boxes (source 'article') may ask for instant joins too; body class gld-club-glass and the
+    //   preview pass flag switch them with the popup. The footer box stays email-only.
     // 0.64.15: the Club join popup in the site's glass look with instant membership (owner, 7 Oct 2026):
     //   email only, the Club makes the member at once (/api/club/join) and an existing member gets a
     //   sign-in link. Behind ?club_popup=new until the option galado_club_popup is 'glass'; the old popup
@@ -259,6 +262,10 @@ final class Galado_Club_Bridge {
         // Club join popup (replaces the retired Klaviyo subscription popup): guests only,
         // never on cart/checkout/account. Name + email -> Club emails a one-tap sign-in link.
         add_action('wp_footer', [__CLASS__, 'join_popup'], 40);
+        // The glass Club sign-ups switch on together: the body class flips the article boxes, the flag
+        // hands the owner's preview pass to them (the popup carries its own).
+        add_filter('body_class', [__CLASS__, 'glass_body_class']);
+        add_action('wp_footer', [__CLASS__, 'glass_preview_flag'], 1);
         // Mid-Year Member Sale (16–19 Jul 2026): member price on the two heroes, the
         // join-to-unlock prompt for guests, and the tier-coupon stacking block. All
         // window-gated (see MYS_* constants) — dormant outside the window.
@@ -3369,7 +3376,7 @@ final class Galado_Club_Bridge {
         // Acquisition surface, forwarded to the Club so signups are attributable (popup vs blog etc.).
         // Whitelisted; anything unrecognised falls back to 'popup' (the original, unchanged default).
         $source = sanitize_key((string) $request->get_param('source'));
-        if (!in_array($source, ['popup', 'blog_sidebar', 'blog_inline'], true)) {
+        if (!in_array($source, ['popup', 'blog_sidebar', 'blog_inline', 'article'], true)) {
             $source = 'popup';
         }
         $ip  = isset($_SERVER['REMOTE_ADDR']) ? (string) $_SERVER['REMOTE_ADDR'] : 'unknown';
@@ -3386,12 +3393,15 @@ final class Galado_Club_Bridge {
             return new WP_Error('slow_down', 'Too many tries from this connection. Please wait a while.', ['status' => 429]);
         }
         set_transient($key, $n + 1, HOUR_IN_SECONDS);
-        // The glass popup (glass_join_popup) asks for instant membership: the Club makes the member
-        // at once and says whether they already were one. Granted only while the glass popup is live
-        // (option galado_club_popup = 'glass') or to the owner's preview, which carries a signed daily
-        // pass. Otherwise, a stale cached glass page included, the visitor gets the sign-in link and the
-        // popup says so. Every other surface keeps the sign-in link.
-        $glass   = 'popup' === $source && !empty($request->get_param('instant'));
+        // The glass sign-ups (the popup, the article card #149 and the iPhone 18/Duo article boxes)
+        // ask for instant membership: the Club makes the member at once and says whether they already
+        // were one. Granted only while they are live (option galado_club_popup = 'glass') or to the
+        // owner's preview, which carries a signed daily pass. Otherwise, a stale cached page included,
+        // the visitor gets the sign-in link and the surface says so.
+        // The article sources never reach the Club's club_joined record (it stays popup-only), so their
+        // marketing consent is the tick alone. If that ever changes, G-Send's SURFACES_WITH_OPTIN_TICK
+        // must learn these sources first, or an untick would be overruled by its implied opt-in.
+        $glass   = !empty($request->get_param('instant'));
         $instant = $glass && ('glass' === get_option('galado_club_popup') || self::glass_preview_pass_ok((string) $request->get_param('pv')));
         $res = wp_remote_post(GALADO_CLUB_URL . ($instant ? '/api/club/join' : '/api/claim/request'), [
             'timeout' => 8,
@@ -3462,7 +3472,7 @@ final class Galado_Club_Bridge {
         if (function_exists('is_cart') && (is_cart() || is_checkout() || is_account_page())) {
             return;
         }
-        if (self::glass_popup_preview() || 'glass' === get_option('galado_club_popup')) {
+        if (self::glass_mode()) {
             self::glass_join_popup();
             return;
         }
@@ -3672,6 +3682,26 @@ if(st&&st.snooze&&Date.now()<st.snooze){showChip()}else{setTimeout(openAll,7000)
 
     private static function glass_popup_preview() {
         return isset($_GET['club_popup']) && 'new' === $_GET['club_popup'];
+    }
+
+    // Whether the glass Club sign-ups are on for this request: live for everyone once the option says
+    // so, or the owner's preview. The article card (#149) reads this too, so they all switch together.
+    public static function glass_mode() {
+        return self::glass_popup_preview() || 'glass' === get_option('galado_club_popup');
+    }
+
+    // The iPhone 18/Duo articles carry both versions of their sign-up boxes; this class shows the Club one.
+    public static function glass_body_class($classes) {
+        if (!is_admin() && self::glass_mode()) {
+            $classes[] = 'gld-club-glass';
+        }
+        return $classes;
+    }
+
+    public static function glass_preview_flag() {
+        if (!is_admin() && self::glass_popup_preview()) {
+            echo '<script>window.GLDCLUB_PV=' . wp_json_encode(self::glass_preview_pass()) . ';</script>';
+        }
     }
 
     // The preview's pass for instant joins before go-live: a signed daily value, never stored.
