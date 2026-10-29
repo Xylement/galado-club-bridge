@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.64.14
+ * Version: 0.64.15
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -43,6 +43,10 @@ final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
     const VERSION  = '0.64.2';   // 0.64.2: provision-customer enriches existing accounts (blank-only billing phone/name from POS)
+    // 0.64.15: the Club join popup in the site's glass look with instant membership (owner, 7 Oct 2026):
+    //   email only, the Club makes the member at once (/api/club/join) and an existing member gets a
+    //   sign-in link. Behind ?club_popup=new until the option galado_club_popup is 'glass'; the old popup
+    //   and every other join surface are unchanged.
     // 0.59.0: the join popup now forwards the exact notice it showed the visitor, so the Club can
     //   record what someone was actually told. Klaviyo is cancelled in September and the popup is
     //   our biggest signup source; the Club will record these as joins, NOT marketing consent,
@@ -99,6 +103,12 @@ final class Galado_Club_Bridge {
     // can never drift from what was on screen. Wording matches the footer band (snippet #215) so
     // the two capture surfaces cannot disagree.
     const POPUP_OPTIN_NOTICE = 'Also email me new drops, restocks and member offers. You can unsubscribe from any email.';
+
+    // The line under the glass popup's button (instant join, owner's call 2026-10-07). Same rules as
+    // POPUP_NOTICE: one definition renders it and is forwarded to the Club as the record of what the
+    // join promised, and it says nothing about marketing. True on both paths: a new member gets the
+    // welcome email with its one-tap link into their Club, an existing member gets a sign-in link.
+    const POPUP_INSTANT_NOTICE = 'No password. We’ll email you a link to your Club.';
 
     const WELCOME_AMOUNT = 10;   // RM off a referred new customer's first order
     const WELCOME_MIN    = 30;   // min cart subtotal (RM) before the referral discount applies
@@ -3376,7 +3386,14 @@ final class Galado_Club_Bridge {
             return new WP_Error('slow_down', 'Too many tries from this connection. Please wait a while.', ['status' => 429]);
         }
         set_transient($key, $n + 1, HOUR_IN_SECONDS);
-        $res = wp_remote_post(GALADO_CLUB_URL . '/api/claim/request', [
+        // The glass popup (glass_join_popup) asks for instant membership: the Club makes the member
+        // at once and says whether they already were one. Granted only while the glass popup is live
+        // (option galado_club_popup = 'glass') or to the owner's preview, which carries a signed daily
+        // pass. Otherwise, a stale cached glass page included, the visitor gets the sign-in link and the
+        // popup says so. Every other surface keeps the sign-in link.
+        $glass   = 'popup' === $source && !empty($request->get_param('instant'));
+        $instant = $glass && ('glass' === get_option('galado_club_popup') || self::glass_preview_pass_ok((string) $request->get_param('pv')));
+        $res = wp_remote_post(GALADO_CLUB_URL . ($instant ? '/api/club/join' : '/api/claim/request'), [
             'timeout' => 8,
             'headers' => ['content-type' => 'application/json', 'x-club-bridge-secret' => GALADO_CLUB_BRIDGE_SECRET],
             // noticeText: the join wording this visitor was actually shown, resolved HERE from the
@@ -3392,7 +3409,7 @@ final class Galado_Club_Bridge {
             // own wording, and the Club does not record joins from it today.
             'body'    => wp_json_encode(array_merge(
                 ['email' => $email, 'name' => mb_substr($name, 0, 60), 'clientIp' => $ip, 'source' => $source],
-                'popup' === $source ? ['noticeText' => self::POPUP_NOTICE] : [],
+                'popup' === $source ? ['noticeText' => $glass ? self::POPUP_INSTANT_NOTICE : self::POPUP_NOTICE] : [],
                 $ref ? ['ref' => $ref] : []
             )),
         ]);
@@ -3401,7 +3418,7 @@ final class Galado_Club_Bridge {
         }
         $code = (int) wp_remote_retrieve_response_code($res);
         if (429 === $code) {
-            return new WP_Error('slow_down', 'Too many sign-in requests. Please wait a few minutes.', ['status' => 429]);
+            return new WP_Error('slow_down', $glass ? 'Too many tries from here. Please wait a few minutes.' : 'Too many sign-in requests. Please wait a few minutes.', ['status' => 429]);
         }
         if ($code >= 400) {
             return new WP_Error('failed', 'Something went sideways. Please try again.', ['status' => 502]);
@@ -3431,7 +3448,11 @@ final class Galado_Club_Bridge {
         if (!empty($request->get_param('optin')) && function_exists('galado_newsletter_emit')) {
             galado_newsletter_emit($email, $name, $source, self::POPUP_OPTIN_NOTICE);
         }
-        return ['ok' => true];
+        if ($instant) {
+            $body = json_decode((string) wp_remote_retrieve_body($res), true);
+            return ['ok' => true, 'returning' => !empty($body['returning'])];
+        }
+        return $glass ? ['ok' => true, 'link' => true] : ['ok' => true];
     }
 
     public static function join_popup() {
@@ -3439,6 +3460,10 @@ final class Galado_Club_Bridge {
             return;
         }
         if (function_exists('is_cart') && (is_cart() || is_checkout() || is_account_page())) {
+            return;
+        }
+        if (self::glass_popup_preview() || 'glass' === get_option('galado_club_popup')) {
+            self::glass_join_popup();
             return;
         }
         $rest = esc_url_raw(rest_url('galado-club/v1/popup-join'));
@@ -3629,6 +3654,310 @@ fetch(GLDPJ_REST,{method:'POST',headers:{'Content-Type':'application/json'},body
 .catch(function(){err.textContent='Could not reach us. Please try again.';err.style.display='block';btn.disabled=false;btn.textContent='JOIN'});
 },true);
 if(st&&st.snooze&&Date.now()<st.snooze){showChip()}else{setTimeout(openAll,7000)}
+})();
+</script>
+<?php
+    }
+
+    /* -- Club join popup, glass (2026-10-07) ------------------------------------------------------
+     * The site's bright glass look with instant membership (owner's calls, 7 Oct 2026: instant member,
+     * email only). One field: the Club makes the member at once (REST /popup-join with instant=1 ->
+     * Club /api/club/join), its welcome email carries the one-tap link into their Club, and someone
+     * already in the Club gets the usual sign-in link instead. Same ids, storage keys and coin as the
+     * popup above, so the blog card (#149), the iPhone 18 guard (#202), the glass menus (#430) and the
+     * app's hiding rules keep working with either.
+     * Preview on any page with ?club_popup=new. Live for every guest when the option galado_club_popup
+     * is 'glass'. Rollback: delete that option. Instant joins stop at once; a page still cached with the
+     * glass popup sends the sign-in link instead and says so, until the page caches are cleared. */
+
+    private static function glass_popup_preview() {
+        return isset($_GET['club_popup']) && 'new' === $_GET['club_popup'];
+    }
+
+    // The preview's pass for instant joins before go-live: a signed daily value, never stored.
+    private static function glass_preview_pass($days_ago = 0) {
+        $day = gmdate('Y-m-d', time() - $days_ago * DAY_IN_SECONDS);
+        return substr(hash_hmac('sha256', 'galado-club-popup-preview|' . $day, wp_salt('auth')), 0, 24);
+    }
+
+    private static function glass_preview_pass_ok($pass) {
+        return '' !== $pass && (hash_equals(self::glass_preview_pass(0), $pass) || hash_equals(self::glass_preview_pass(1), $pass));
+    }
+
+    public static function glass_join_popup() {
+        $rest    = esc_url_raw(rest_url('galado-club/v1/popup-join'));
+        $preview = self::glass_popup_preview();
+        $pass    = $preview ? self::glass_preview_pass() : '';
+        $club    = 'https://club.galado.com.my/';
+        ?>
+<div id="gldpj" role="dialog" aria-modal="true" aria-labelledby="gldpj-title">
+<style>
+#gldpj{--pj-ink:#111111;--pj-ink-2:#3d3d3d;--pj-mute:#66625c;--pj-faint:#8f8a82;--pj-red:#E4002B;--pj-line:rgb(17 17 17 / 8%);--pj-wash:rgb(17 17 17 / 5%);--pj-ease:cubic-bezier(.16,1,.3,1);--pj-pop:cubic-bezier(.34,1.56,.64,1);position:fixed;inset:0;z-index:999999;display:none;flex-direction:column;padding:24px 16px;overflow-y:auto;overscroll-behavior:contain;font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:var(--pj-ink);text-align:left;-webkit-font-smoothing:antialiased;}
+#gldpj.on{display:flex;}
+#gldpj *{box-sizing:border-box;}
+#gldpj [hidden]{display:none !important;}
+#gldpj .pj-scrim{position:fixed;inset:0;background:rgb(240 239 236 / 52%);-webkit-backdrop-filter:blur(12px) saturate(140%);backdrop-filter:blur(12px) saturate(140%);opacity:0;transition:opacity .35s ease;}
+#gldpj.in .pj-scrim{opacity:1;}
+#gldpj .pj-wrap{position:relative;width:100%;max-width:440px;margin:auto;padding-top:112px;}
+#gldpj .pj-buds{position:absolute;top:0;right:66px;width:190px;height:170px;}
+#gldpj .pj-bud{position:absolute;top:-24px;width:auto;max-width:none;height:232px;margin:0;opacity:0;transform:translateY(70px);transition:transform .75s var(--pj-pop),opacity .25s ease;filter:drop-shadow(0 10px 12px rgb(17 17 17 / 12%));}
+#gldpj .pj-bud1{left:0;transition-delay:.12s;}
+#gldpj .pj-bud2{left:58px;top:-31px;height:240px;z-index:1;transition-delay:.2s;}
+#gldpj .pj-coin{position:absolute;left:2px;top:46px;width:46px;height:auto;max-width:none;margin:0;z-index:2;opacity:0;transform:translateY(16px) rotate(-30deg) scale(.6);transition:transform .7s var(--pj-pop) .42s,opacity .25s ease .42s;}
+#gldpj.in .pj-bud{opacity:1;transform:none;}
+#gldpj.in .pj-coin{opacity:1;transform:rotate(-14deg);}
+#gldpj .pj-card{position:relative;z-index:1;padding:24px 24px 16px;border-radius:28px;background:rgb(255 255 255 / 78%);border:1px solid rgb(255 255 255 / 75%);-webkit-backdrop-filter:blur(28px) saturate(185%);backdrop-filter:blur(28px) saturate(185%);box-shadow:inset 1px 1px 0 rgb(255 255 255 / 95%),inset -1px -1px 0 rgb(255 255 255 / 35%),0 0 0 1px rgb(17 17 17 / 6%),0 2px 4px rgb(17 17 17 / 5%),0 40px 80px -26px rgb(46 34 62 / 40%);opacity:0;transform:translateY(28px) scale(.98);transition:opacity .35s ease,transform .6s var(--pj-ease);}
+#gldpj .pj-card::before{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;background:linear-gradient(125deg,rgb(255 255 255 / 46%) 0%,rgb(255 255 255 / 10%) 36%,rgb(255 255 255 / 0%) 58%);}
+#gldpj.in .pj-card{opacity:1;transform:none;}
+#gldpj .pj-main,#gldpj .pj-done{position:relative;}
+#gldpj .pj-x{position:absolute;top:14px;right:14px;z-index:3;display:flex;align-items:center;justify-content:center;width:36px;height:36px;min-height:0;margin:0;padding:0;border:0;border-radius:999px;background:var(--pj-wash);color:var(--pj-ink);box-shadow:none;cursor:pointer;transition:background-color .2s;}
+#gldpj .pj-x:hover{background:rgb(17 17 17 / 9%);}
+#gldpj .pj-x svg{width:15px;height:15px;fill:currentColor;}
+#gldpj .pj-lockup{display:flex;align-items:center;gap:8px;margin:2px 0 16px;padding:0;}
+#gldpj .pj-lockup b{font:800 17px/1 'Archivo','Arial Black',Arial,sans-serif;letter-spacing:.02em;color:var(--pj-ink);}
+#gldpj .pj-lockup i{font:700 10.5px/1 'Inter',sans-serif;font-style:normal;letter-spacing:.06em;text-transform:uppercase;color:#fff;background:var(--pj-red);padding:4px 9px 3px;border-radius:999px;}
+#gldpj h2{margin:0 0 6px;padding:0;font:800 32px/1.02 'Archivo','Arial Black',Arial,sans-serif;letter-spacing:-.025em;text-transform:none;color:var(--pj-ink);text-wrap:balance;}
+#gldpj .pj-sub{margin:0 0 18px;padding:0;font:400 15px/1.45 'Inter',sans-serif;color:var(--pj-mute);}
+#gldpj .pj-perks{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:0 0 18px;padding:0;list-style:none;}
+#gldpj .pj-perks li{display:flex;flex-direction:column;align-items:flex-start;gap:10px;margin:0;padding:12px 11px 13px;border-radius:16px;background:rgb(255 255 255 / 64%);border:1px solid var(--pj-line);font:600 12.5px/1.3 'Inter',sans-serif;color:var(--pj-ink);list-style:none;}
+#gldpj .pj-perks svg{width:22px;height:22px;fill:currentColor;flex:none;}
+#gldpj .pj-f{margin:0;padding:0;border:0;background:none;}
+#gldpj .pj-field{position:relative;margin:0;}
+#gldpj .pj-field>svg{position:absolute;left:18px;top:50%;z-index:1;width:20px;height:20px;margin-top:-10px;fill:var(--pj-faint);pointer-events:none;transition:fill .2s;}
+#gldpj .pj-field:focus-within>svg{fill:var(--pj-ink);}
+#gldpj input.pj-email{display:block;width:100%;height:58px;margin:0;padding:0 128px 0 48px;border:1px solid;border-color:rgb(17 17 17 / 10%) !important;border-radius:999px !important;background:#fff;color:var(--pj-ink);font:400 16px/1 'Inter',sans-serif;letter-spacing:0;box-shadow:0 1px 2px rgb(17 17 17 / 4%) !important;outline:none;-webkit-appearance:none;appearance:none;transition:border-color .2s,box-shadow .2s;}
+#gldpj input.pj-email::placeholder{color:var(--pj-faint);opacity:1;}
+#gldpj input.pj-email:hover{border-color:rgb(17 17 17 / 18%) !important;}
+#gldpj input.pj-email:focus{border-color:var(--pj-ink) !important;box-shadow:0 0 0 4px rgb(17 17 17 / 8%) !important;}
+#gldpj .pj-go,#gldpj .pj-ok{display:flex;align-items:center;justify-content:center;min-height:0;margin:0;border:0;border-radius:999px;background:var(--pj-ink);color:#fff;font:700 15px/1 'Archivo','Arial Black',Arial,sans-serif;letter-spacing:.01em;text-transform:none;white-space:nowrap;box-shadow:0 8px 20px -10px rgb(17 17 17 / 60%);cursor:pointer;transition:transform .25s var(--pj-ease),background-color .2s;}
+#gldpj .pj-go{position:absolute;top:6px;right:6px;height:46px;padding:0 20px;}
+#gldpj .pj-go:hover,#gldpj .pj-ok:hover{background:#2b2b2b;color:#fff;}
+#gldpj .pj-go:active,#gldpj .pj-ok:active{transform:scale(.97);}
+#gldpj .pj-go:disabled{opacity:.6;cursor:default;transform:none;}
+#gldpj .pj-hp{position:absolute;left:-9999px;width:0;height:0;opacity:0;}
+#gldpj .pj-optin{display:flex;align-items:flex-start;gap:10px;margin:14px 0 0;padding:0 6px;font:400 12.5px/1.45 'Inter',sans-serif;letter-spacing:0;text-transform:none;color:var(--pj-mute);text-wrap:pretty;cursor:pointer;}
+#gldpj .pj-optin input{flex:none;width:18px;height:18px;margin:0;padding:0;border:1px solid rgb(17 17 17 / 28%);border-radius:6px;background:#fff center/12px no-repeat;-webkit-appearance:none;appearance:none;cursor:pointer;transition:background-color .15s,border-color .15s;}
+#gldpj .pj-optin input:checked{background-color:var(--pj-ink);border-color:var(--pj-ink);background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'%3E%3Cpath fill='%23fff' d='M232.49,80.49l-128,128a12,12,0,0,1-17,0l-56-56a12,12,0,1,1,17-17L96,183,215.51,63.51a12,12,0,0,1,17,17Z'/%3E%3C/svg%3E");}
+#gldpj .pj-err{margin:10px 6px 0;padding:0;font:600 13px/1.4 'Inter',sans-serif;color:#C4001F;}
+#gldpj .pj-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:16px 0 0;padding:14px 6px 0;border-top:1px solid var(--pj-line);}
+#gldpj .pj-note{margin:0;padding:0;font:400 12px/1.45 'Inter',sans-serif;color:var(--pj-faint);text-wrap:pretty;}
+#gldpj .pj-no{flex:none;min-height:0;margin:0;padding:6px 0;border:0;background:none;box-shadow:none;font:600 12.5px/1 'Inter',sans-serif;letter-spacing:0;text-transform:none;color:var(--pj-mute);text-decoration:underline;text-decoration-color:rgb(17 17 17 / 25%);text-underline-offset:3px;cursor:pointer;}
+#gldpj .pj-no:hover{color:var(--pj-ink);}
+#gldpj :is(.pj-x,.pj-go,.pj-no,.pj-ok,.pj-optin input):focus-visible{outline:2px solid var(--pj-ink);outline-offset:2px;}
+#gldpj .pj-done{display:none;padding:2px 0 8px;}
+#gldpj.done .pj-main{display:none;}
+#gldpj.done .pj-done{display:block;}
+#gldpj .pj-done h3{margin:4px 0 10px;padding:0;font:800 32px/1.02 'Archivo','Arial Black',Arial,sans-serif;letter-spacing:-.025em;text-transform:none;color:var(--pj-ink);outline:none;}
+#gldpj .pj-done p{margin:0 0 8px;padding:0;font:400 15px/1.5 'Inter',sans-serif;color:var(--pj-ink-2);text-wrap:pretty;}
+#gldpj .pj-done p.pj-to{display:flex;align-items:center;gap:8px;width:fit-content;max-width:100%;margin:12px 0 14px;padding:9px 16px 9px 12px;border-radius:999px;background:rgb(255 255 255 / 72%);border:1px solid var(--pj-line);font:600 14.5px/1.3 'Inter',sans-serif;color:var(--pj-ink);}
+#gldpj .pj-to svg{flex:none;width:18px;height:18px;fill:var(--pj-mute);}
+#gldpj .pj-to strong{min-width:0;font-weight:600;overflow-wrap:anywhere;}
+#gldpj .pj-nw{white-space:nowrap;}
+#gldpj .pj-done p.pj-small{font-size:13px;color:var(--pj-mute);}
+#gldpj .pj-done .pj-back,#gldpj .pj-done .pj-link,#gldpj.back .pj-done .pj-new,#gldpj.link .pj-done .pj-new{display:none;}
+#gldpj.back .pj-done h3 .pj-back,#gldpj.link .pj-done h3 .pj-link{display:inline;}
+#gldpj.back .pj-done p.pj-back,#gldpj.link .pj-done p.pj-link{display:block;}
+#gldpj .pj-ok{width:100%;height:52px;margin:18px 0 0;padding:0 24px;font-size:16px;}
+#gldpj.done .pj-bud1{animation:pj-hop .7s var(--pj-pop) .05s;}
+#gldpj.done .pj-bud2{animation:pj-hop .7s var(--pj-pop) .16s;}
+#gldpj.done .pj-coin{animation:pj-flip .9s var(--pj-ease) .1s;}
+@keyframes pj-hop{0%,100%{transform:none;}40%{transform:translateY(-18px);}}
+@keyframes pj-flip{0%{transform:rotate(-14deg);}50%{transform:translateY(-22px) rotate(-14deg) scaleX(-1);}100%{transform:rotate(-14deg);}}
+#gldpj-min{position:fixed;right:18px;left:auto;top:calc(50% - 27px);bottom:auto;z-index:999998;width:54px;height:54px;min-height:0;margin:0;padding:0;align-items:center;justify-content:center;border:1px solid rgb(255 255 255 / 80%);border-radius:50%;background:rgb(255 255 255 / 80%);-webkit-backdrop-filter:blur(20px) saturate(180%);backdrop-filter:blur(20px) saturate(180%);box-shadow:inset 0 1px 0 rgb(255 255 255 / 90%),0 0 0 1px rgb(17 17 17 / 6%),0 12px 26px -10px rgb(17 17 17 / 38%);cursor:pointer;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;transition:transform .2s cubic-bezier(.16,1,.3,1);}
+#gldpj-min:hover{transform:scale(1.06);}
+#gldpj-min img{display:block;width:30px;height:auto;margin:0 auto;}
+#gldpj-min .pj-mx{position:absolute;top:-6px;left:-6px;width:20px;height:20px;border:2px solid #fff;border-radius:50%;background:#111111;color:#fff;font:700 12px/16px Arial,sans-serif;text-align:center;box-shadow:0 2px 6px rgb(17 17 17 / 30%);}
+@media (max-width:640px){
+#gldpj{padding:12px 10px calc(10px + env(safe-area-inset-bottom, 0px));}
+#gldpj .pj-wrap{max-width:none;margin:auto 0 0;padding-top:106px;}
+#gldpj .pj-buds{right:52px;transform:scale(.92);transform-origin:100% 0;}
+#gldpj .pj-card{padding:22px 18px 14px;transform:translateY(56px);}
+#gldpj h2,#gldpj .pj-done h3{font-size:28px;}
+#gldpj .pj-sub{font-size:14.5px;margin-bottom:16px;}
+#gldpj .pj-perks{gap:6px;margin-bottom:16px;}
+#gldpj .pj-perks li{gap:8px;padding:10px 10px 11px;font-size:12px;border-radius:14px;}
+#gldpj .pj-perks svg{width:20px;height:20px;}
+#gldpj .pj-go{padding:0 16px;}
+#gldpj input.pj-email{padding-right:112px;}
+#gldpj-min{right:12px;top:calc(50% - 25px);width:50px;height:50px;}
+}
+@media (prefers-reduced-motion:reduce){
+#gldpj .pj-card,#gldpj .pj-bud,#gldpj .pj-coin,#gldpj .pj-scrim{transform:none !important;transition:opacity .2s ease !important;animation:none !important;}
+#gldpj.in .pj-coin{transform:rotate(-14deg) !important;}
+}
+@media (prefers-reduced-transparency:reduce){
+#gldpj .pj-card{background:#fff;-webkit-backdrop-filter:none;backdrop-filter:none;}
+#gldpj .pj-scrim{background:rgb(241 240 238 / 94%);-webkit-backdrop-filter:none;backdrop-filter:none;}
+#gldpj-min{background:#fff;-webkit-backdrop-filter:none;backdrop-filter:none;}
+}
+@supports not ((-webkit-backdrop-filter:blur(1px)) or (backdrop-filter:blur(1px))){
+#gldpj .pj-card{background:rgb(255 255 255 / 97%);}
+#gldpj .pj-scrim{background:rgb(241 240 238 / 90%);}
+#gldpj-min{background:#fff;}
+}
+</style>
+<div class="pj-scrim"></div>
+<div class="pj-wrap">
+<div class="pj-buds" aria-hidden="true">
+<img class="pj-bud pj-bud1" src="<?php echo esc_url($club . 'avatar-girl-outfit-casual-denim-cut.png'); ?>" alt="" width="522" height="700" loading="lazy" decoding="async"/>
+<img class="pj-bud pj-bud2" src="<?php echo esc_url($club . 'avatar-boy-outfit-casual-denim-cut.png'); ?>" alt="" width="522" height="700" loading="lazy" decoding="async"/>
+<img class="pj-coin" src="<?php echo esc_url($club . 'coin.png'); ?>" alt="" width="220" height="198" loading="lazy" decoding="async"/>
+</div>
+<div class="pj-card">
+<button type="button" class="pj-x" aria-label="Close"><svg viewBox="0 0 256 256" aria-hidden="true"><path d="M208.49,191.51a12,12,0,0,1-17,17L128,145,64.49,208.49a12,12,0,0,1-17-17L111,128,47.51,64.49a12,12,0,0,1,17-17L128,111l63.51-63.52a12,12,0,0,1,17,17L145,128Z"/></svg></button>
+<div class="pj-main">
+<p class="pj-lockup"><b>GALADO</b><i>Club</i></p>
+<h2 id="gldpj-title">Join the Club</h2>
+<p class="pj-sub">Free for life. Your email is all it takes.</p>
+<ul class="pj-perks">
+<li><svg viewBox="0 0 256 256" aria-hidden="true"><path d="M184,89.57V84c0-25.08-37.83-44-88-44S8,58.92,8,84v40c0,20.89,26.25,37.49,64,42.46V172c0,25.08,37.83,44,88,44s88-18.92,88-44V132C248,111.3,222.58,94.68,184,89.57ZM232,132c0,13.22-30.79,28-72,28-3.73,0-7.43-.13-11.08-.37C170.49,151.77,184,139,184,124V105.74C213.87,110.19,232,122.27,232,132ZM72,150.25V126.46A183.74,183.74,0,0,0,96,128a183.74,183.74,0,0,0,24-1.54v23.79A163,163,0,0,1,96,152,163,163,0,0,1,72,150.25Zm96-40.32V124c0,8.39-12.41,17.4-32,22.87V123.5C148.91,120.37,159.84,115.71,168,109.93ZM96,56c41.21,0,72,14.78,72,28s-30.79,28-72,28S24,97.22,24,84,54.79,56,96,56ZM24,124V109.93c8.16,5.78,19.09,10.44,32,13.57v23.37C36.41,141.4,24,132.39,24,124Zm64,48v-4.17c2.63.1,5.29.17,8,.17,3.88,0,7.67-.13,11.39-.35A121.92,121.92,0,0,0,120,171.41v23.46C100.41,189.4,88,180.39,88,172Zm48,26.25V174.4a179.48,179.48,0,0,0,24,1.6,183.74,183.74,0,0,0,24-1.54v23.79a165.45,165.45,0,0,1-48,0Zm64-3.38V171.5c12.91-3.13,23.84-7.79,32-13.57V172C232,180.39,219.59,189.4,200,194.87Z"/></svg>Rewards on every order</li>
+<li><svg viewBox="0 0 256 256" aria-hidden="true"><path d="M225.86,102.82c-3.77-3.94-7.67-8-9.14-11.57-1.36-3.27-1.44-8.69-1.52-13.94-.15-9.76-.31-20.82-8-28.51s-18.75-7.85-28.51-8c-5.25-.08-10.67-.16-13.94-1.52-3.56-1.47-7.63-5.37-11.57-9.14C146.28,23.51,138.44,16,128,16s-18.27,7.51-25.18,14.14c-3.94,3.77-8,7.67-11.57,9.14C88,40.64,82.56,40.72,77.31,40.8c-9.76.15-20.82.31-28.51,8S41,67.55,40.8,77.31c-.08,5.25-.16,10.67-1.52,13.94-1.47,3.56-5.37,7.63-9.14,11.57C23.51,109.73,16,117.56,16,128s7.51,18.27,14.14,25.18c3.77,3.94,7.67,8,9.14,11.57,1.36,3.27,1.44,8.69,1.52,13.94.15,9.76.31,20.82,8,28.51s18.75,7.85,28.51,8c5.25.08,10.67.16,13.94,1.52,3.56,1.47,7.63,5.37,11.57,9.14C109.72,232.49,117.56,240,128,240s18.27-7.51,25.18-14.14c3.94-3.77,8-7.67,11.57-9.14,3.27-1.36,8.69-1.44,13.94-1.52,9.76-.15,20.82-.31,28.51-8s7.85-18.75,8-28.51c.08-5.25.16-10.67,1.52-13.94,1.47-3.56,5.37-7.63,9.14-11.57C232.49,146.27,240,138.44,240,128S232.49,109.73,225.86,102.82Zm-11.55,39.29c-4.79,5-9.75,10.17-12.38,16.52-2.52,6.1-2.63,13.07-2.73,19.82-.1,7-.21,14.33-3.32,17.43s-10.39,3.22-17.43,3.32c-6.75.1-13.72.21-19.82,2.73-6.35,2.63-11.52,7.59-16.52,12.38S132,224,128,224s-9.15-4.92-14.11-9.69-10.17-9.75-16.52-12.38c-6.1-2.52-13.07-2.63-19.82-2.73-7-.1-14.33-.21-17.43-3.32s-3.22-10.39-3.32-17.43c-.1-6.75-.21-13.72-2.73-19.82-2.63-6.35-7.59-11.52-12.38-16.52S32,132,32,128s4.92-9.14,9.69-14.11,9.75-10.17,12.38-16.52c2.52-6.1,2.63-13.07,2.73-19.82.1-7,.21-14.33,3.32-17.43S70.51,56.9,77.55,56.8c6.75-.1,13.72-.21,19.82-2.73,6.35-2.63,11.52-7.59,16.52-12.38S124,32,128,32s9.15,4.92,14.11,9.69,10.17,9.75,16.52,12.38c6.1,2.52,13.07,2.63,19.82,2.73,7,.1,14.33.21,17.43,3.32s3.22,10.39,3.32,17.43c.1,6.75.21,13.72,2.73,19.82,2.63,6.35,7.59,11.52,12.38,16.52S224,124,224,128,219.08,137.14,214.31,142.11ZM120,96a24,24,0,1,0-24,24A24,24,0,0,0,120,96ZM88,96a8,8,0,1,1,8,8A8,8,0,0,1,88,96Zm72,40a24,24,0,1,0,24,24A24,24,0,0,0,160,136Zm0,32a8,8,0,1,1,8-8A8,8,0,0,1,160,168Zm13.66-74.34-80,80a8,8,0,0,1-11.32-11.32l80-80a8,8,0,0,1,11.32,11.32Z"/></svg>Up to 15% off for members</li>
+<li><svg viewBox="0 0 256 256" aria-hidden="true"><path d="M216,72H180.92c.39-.33.79-.65,1.17-1A29.53,29.53,0,0,0,192,49.57,32.62,32.62,0,0,0,158.44,16,29.53,29.53,0,0,0,137,25.91a54.94,54.94,0,0,0-9,14.48,54.94,54.94,0,0,0-9-14.48A29.53,29.53,0,0,0,97.56,16,32.62,32.62,0,0,0,64,49.57,29.53,29.53,0,0,0,73.91,71c.38.33.78.65,1.17,1H40A16,16,0,0,0,24,88v32a16,16,0,0,0,16,16v64a16,16,0,0,0,16,16H200a16,16,0,0,0,16-16V136a16,16,0,0,0,16-16V88A16,16,0,0,0,216,72ZM149,36.51a13.69,13.69,0,0,1,10-4.5h.49A16.62,16.62,0,0,1,176,49.08a13.69,13.69,0,0,1-4.5,10c-9.49,8.4-25.24,11.36-35,12.4C137.7,60.89,141,45.5,149,36.51Zm-64.09.36A16.63,16.63,0,0,1,96.59,32h.49a13.69,13.69,0,0,1,10,4.5c8.39,9.48,11.35,25.2,12.39,34.92-9.72-1-25.44-4-34.92-12.39a13.69,13.69,0,0,1-4.5-10A16.6,16.6,0,0,1,84.87,36.87ZM40,88h80v32H40Zm16,48h64v64H56Zm144,64H136V136h64Zm16-80H136V88h80v32Z"/></svg>Early access &amp; surprises</li>
+</ul>
+<form class="pj-f" novalidate>
+<div class="pj-field">
+<svg viewBox="0 0 256 256" aria-hidden="true"><path d="M224,48H32a8,8,0,0,0-8,8V192a16,16,0,0,0,16,16H216a16,16,0,0,0,16-16V56A8,8,0,0,0,224,48ZM203.43,64,128,133.15,52.57,64ZM216,192H40V74.19l82.59,75.71a8,8,0,0,0,10.82,0L216,74.19V192Z"/></svg>
+<input class="pj-email" type="email" name="email" placeholder="Your email" aria-label="Email" maxlength="254" required autocomplete="email" inputmode="email" autocapitalize="off" spellcheck="false"/>
+<button type="submit" class="pj-go">I&#8217;m in &#10022;</button>
+</div>
+<input type="text" name="website" class="pj-hp" tabindex="-1" autocomplete="off" aria-hidden="true"/>
+<?php if (function_exists('galado_newsletter_is_live') && galado_newsletter_is_live()) : ?>
+<label class="pj-optin"><input type="checkbox" name="optin" checked/><span><?php echo esc_html(self::POPUP_OPTIN_NOTICE); ?></span></label>
+<?php endif; ?>
+<p class="pj-err" role="alert" hidden></p>
+</form>
+<div class="pj-foot">
+<p class="pj-note"><?php echo esc_html(self::POPUP_INSTANT_NOTICE); ?></p>
+<button type="button" class="pj-no">No thanks</button>
+</div>
+</div>
+<div class="pj-done">
+<h3 tabindex="-1"><span class="pj-new">You&#8217;re in &#10022;</span><span class="pj-back">Welcome back &#10022;</span><span class="pj-link">Check your inbox &#10022;</span></h3>
+<p class="pj-new">Welcome to GALADO Club. We&#8217;ve sent a link to your Club to</p>
+<p class="pj-back">You&#8217;re already in the Club. We&#8217;ve sent a <span class="pj-nw">one-tap</span> <span class="pj-nw">sign-in</span> link to</p>
+<p class="pj-link">One last tap: we&#8217;ve sent a link to finish joining to</p>
+<p class="pj-to"><svg viewBox="0 0 256 256" aria-hidden="true"><path d="M224,48H32a8,8,0,0,0-8,8V192a16,16,0,0,0,16,16H216a16,16,0,0,0,16-16V56A8,8,0,0,0,224,48ZM203.43,64,128,133.15,52.57,64ZM216,192H40V74.19l82.59,75.71a8,8,0,0,0,10.82,0L216,74.19V192Z"/></svg><strong class="pj-mail"></strong></p>
+<p class="pj-new pj-small">Shop with this email and every order earns you <span class="pj-nw">G-Coins</span>.</p>
+<p class="pj-back pj-link pj-small">It works for 20 minutes. If it plays hide and seek, peek in spam.</p>
+<button type="button" class="pj-ok">Keep shopping</button>
+</div>
+</div>
+</div>
+</div>
+<button id="gldpj-min" type="button" aria-label="Join the GALADO Club" title="GALADO Club" style="display:none;">
+<img src="<?php echo esc_url($club . 'coin.png'); ?>" alt="" loading="lazy"/>
+<span class="pj-mx" title="Hide" aria-label="Hide the Club coin">&times;</span>
+</button>
+<script>
+var GLDPJ_REST=<?php echo wp_json_encode($rest); ?>;
+(function(){
+if(window.__gldpjBooted)return;window.__gldpjBooted=1;
+var KEY='gldpj_v1',PREVIEW=<?php echo $preview ? 'true' : 'false'; ?>,PASS=<?php echo wp_json_encode($pass); ?>,didJoin=false;
+function boxes(){return [].slice.call(document.querySelectorAll('#gldpj'))}
+function chips(){return [].slice.call(document.querySelectorAll('#gldpj-min'))}
+if(!boxes().length)return;
+var st=null;try{st=JSON.parse(localStorage.getItem(KEY)||'null')}catch(e){}
+/* ?club_popup=new is the owner's preview: it opens whatever this browser said before */
+if(PREVIEW)st=null;
+if(st&&st.joined)return;
+function save(o){try{localStorage.setItem(KEY,JSON.stringify(o))}catch(e){}}
+function isOpen(){return boxes().some(function(b){return b.classList.contains('on')})}
+/* X on the coin: hides it for the rest of the browsing session (it can cover the
+   case-designer canvas); back next session so the acquisition surface survives. */
+function chipClosed(){try{return sessionStorage.getItem('gldpj_chip_x')==='1'}catch(e){return false}}
+function closeChip(){try{sessionStorage.setItem('gldpj_chip_x','1')}catch(e){}hideChip()}
+function showChip(){if(chipClosed())return;chips().forEach(function(c){c.style.display='flex'})}
+function hideChip(){chips().forEach(function(c){c.style.display='none'})}
+/* The pictures load lazily; fetch them before the popup opens so the Buddies arrive with it. */
+function warm(){boxes().forEach(function(b){[].slice.call(b.querySelectorAll('img')).forEach(function(i){var w=new Image();w.src=i.currentSrc||i.src})})}
+function openAll(){boxes().forEach(function(b){b.classList.remove('done','back','link');b.classList.add('on');
+requestAnimationFrame(function(){requestAnimationFrame(function(){b.classList.add('in')})})});hideChip()}
+function hideAll(){boxes().forEach(function(b){b.classList.remove('in');setTimeout(function(){if(!b.classList.contains('in'))b.classList.remove('on')},260)})}
+/* After a join the X and the backdrop just close it: no coin, no snooze over the joined flag. */
+function closeAll(d){if(!isOpen())return;hideAll();if(didJoin)return;showChip();if(d)save({snooze:Date.now()+d*864e5})}
+function joined(){didJoin=true;hideChip();save({joined:true})}
+/* Submit telemetry. Same event name and shape as the blog card's (snippet #149) so the two
+   surfaces are comparable side by side, distinguished by method. Fires ONLY after a successful
+   response. NEVER carries the email address: this counts the submit, never who submitted. */
+function track(optin){var p={method:'popup',join_source:'popup',optin:!!optin};
+if(typeof window.gtag==='function'){window.gtag('event','club_join_submit',p)}
+else if(window.dataLayer&&window.dataLayer.push){p.event='club_join_submit';window.dataLayer.push(p)}}
+/* Minimised coin is draggable (pointer events = touch + mouse) so it never has to sit on a
+   product page's sticky add-to-cart bar; the spot is remembered across pages. A plain tap still
+   opens the popup; only a real drag (>6px) suppresses the click that follows it. */
+var GLDPJ_DRAG_AT=0,PKEY='gldpj_pos_v1';
+function clampPos(pos,c){var w=c.offsetWidth||52,h=c.offsetHeight||52,M=8;
+return{x:Math.min(Math.max(pos.x,M),(window.innerWidth||360)-w-M),
+y:Math.min(Math.max(pos.y,M),(window.innerHeight||640)-h-M)}}
+function applyPos(){var p=null;try{p=JSON.parse(localStorage.getItem(PKEY)||'null')}catch(e){}
+if(!p||typeof p.x!=='number'||typeof p.y!=='number')return;
+chips().forEach(function(c){var q=clampPos(p,c);
+c.style.left=q.x+'px';c.style.top=q.y+'px';c.style.bottom='auto';c.style.right='auto'})}
+if(window.PointerEvent)chips().forEach(function(c){
+var pid=null,sx=0,sy=0,ox=0,oy=0,moved=false;
+c.addEventListener('pointerdown',function(e){
+if(e.button&&e.button!==0)return;
+if(e.target&&e.target.closest&&e.target.closest('.pj-mx'))return; /* X badge: no drag or pointer capture, so its click still closes the coin */
+pid=e.pointerId;moved=false;sx=e.clientX;sy=e.clientY;
+var r=c.getBoundingClientRect();ox=r.left;oy=r.top;
+try{c.setPointerCapture(pid)}catch(err){}});
+c.addEventListener('pointermove',function(e){
+if(pid===null||e.pointerId!==pid)return;
+var dx=e.clientX-sx,dy=e.clientY-sy;
+if(!moved&&(dx*dx+dy*dy)<36)return;
+moved=true;
+var q=clampPos({x:ox+dx,y:oy+dy},c);
+c.style.left=q.x+'px';c.style.top=q.y+'px';c.style.bottom='auto';c.style.right='auto'});
+function endDrag(e){
+if(pid===null||(e.pointerId!==undefined&&e.pointerId!==pid))return;
+pid=null;
+if(moved){GLDPJ_DRAG_AT=Date.now();
+var r=c.getBoundingClientRect();
+try{localStorage.setItem(PKEY,JSON.stringify({x:r.left,y:r.top}))}catch(err){}}}
+c.addEventListener('pointerup',endDrag);
+c.addEventListener('pointercancel',endDrag);});
+window.addEventListener('resize',applyPos);
+applyPos();
+document.addEventListener('keydown',function(e){if(e.key==='Escape')closeAll(7)});
+document.addEventListener('click',function(e){
+var t=e.target;if(!t||!t.closest)return;
+if(t.closest('#gldpj-min .pj-mx')){e.preventDefault();e.stopPropagation();closeChip();return}
+if(t.closest('#gldpj-min')){if(Date.now()-GLDPJ_DRAG_AT<400)return;warm();openAll();return}
+if(!isOpen())return;
+if(t.closest('#gldpj .pj-x')){closeAll(7);return}
+if(t.closest('#gldpj .pj-no')){closeAll(14);return}
+if(t.closest('#gldpj .pj-ok')){hideAll();return}
+},true);
+document.addEventListener('submit',function(e){
+var f=e.target;if(!f||!f.classList||!f.classList.contains('pj-f'))return;
+e.preventDefault();
+var box=f.closest('#gldpj')||document,err=f.querySelector('.pj-err'),btn=f.querySelector('.pj-go'),label=btn.innerHTML;
+var email=(f.querySelector('input[name=email]').value||'').trim();
+var hp=(f.querySelector('input[name=website]').value||'');
+var ck=f.querySelector('input[name=optin]');
+function fail(m){err.textContent=m;err.hidden=false;btn.disabled=false;btn.innerHTML=label}
+if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){fail('Please enter a valid email.');return}
+err.hidden=true;btn.disabled=true;btn.textContent='Joining…';
+fetch(GLDPJ_REST,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email,website:hp,optin:ck?ck.checked:false,instant:1,pv:PASS})})
+.then(function(r){return r.json().then(function(b){return{ok:r.ok,body:b}})})
+.then(function(r){
+if(!r.ok){fail((r.body&&r.body.message)||'Something went sideways. Please try again.');return}
+[].slice.call(box.querySelectorAll('.pj-mail')).forEach(function(m){m.textContent=email});
+box.classList.toggle('back',!!(r.body&&r.body.returning));box.classList.toggle('link',!!(r.body&&r.body.link));box.classList.add('done');
+var h=box.querySelector('.pj-done h3');if(h)h.focus({preventScroll:true});
+btn.disabled=false;btn.innerHTML=label;
+joined();track(ck&&ck.checked)})
+.catch(function(){fail('Could not reach us. Please try again.')});
+},true);
+/* A tap on the backdrop closes it. iOS Safari sends no click up to the document for a tap on a plain
+   element, so the backdrop pieces listen themselves. */
+boxes().forEach(function(b){[b,b.querySelector('.pj-scrim'),b.querySelector('.pj-wrap')].forEach(function(el){
+if(el)el.addEventListener('click',function(e){if(e.target===el&&isOpen())closeAll(7)})})});
+/* The pictures are fetched just before the popup opens, never during the page's own load. */
+function warmSoon(ms){setTimeout(function(){if(window.requestIdleCallback){requestIdleCallback(warm,{timeout:1500})}else{warm()}},ms)}
+if(PREVIEW){warm();setTimeout(openAll,1200)}
+else if(st&&st.snooze&&Date.now()<st.snooze){showChip()}
+else{warmSoon(4500);setTimeout(openAll,7000)}
 })();
 </script>
 <?php
