@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.64.18
+ * Version: 0.64.19
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -43,6 +43,13 @@ final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
     const VERSION  = '0.64.2';   // 0.64.2: provision-customer enriches existing accounts (blank-only billing phone/name from POS)
+    // 0.64.19: first orders get the bigger of the first-order offer and a sale code, never both (Clement,
+    //   9 Oct 2026, for 11.11). A sale snippet names its codes through galado_first_order_competing_coupons;
+    //   when one takes more than 0 off, the cart, the app quote and the app order drop the welcome or
+    //   referral fee and stamp _galado_intro_yielded. galado_first_order_offer_amount() and
+    //   galado_to_request_currency() let the snippet compare in the shopper's currency; bundle-priced app
+    //   lines carry _galado_pwp. Contract: galado-woo-integrity/sale-1111/BRIDGE-CONTRACT.md. Off switch:
+    //   option galado_first_order_bigger_only = no.
     // 0.64.18: paired sale codes in the app (Club Dev, 9 Oct 2026, the 10.10 sale): /app-order and its quote
     //   apply a coupon's partners after it, named by the filter galado_coupon_partners (snippet #435 answers
     //   GLD1010 with gld1010-rm10, the RM10 the website cart adds on woocommerce_applied_coupon, which never
@@ -993,7 +1000,8 @@ final class Galado_Club_Bridge {
                 return new WP_Error('bad_request', 'variation_id required for variable product ' . $pid, ['status' => 400]);
             }
             $key = $pid . '|' . $vid;
-            if (!empty($pwp_map[$key]) && (int) $pwp_map[$key][0]['qty'] === $qty) {
+            $is_pwp = !empty($pwp_map[$key]) && (int) $pwp_map[$key][0]['qty'] === $qty;
+            if ($is_pwp) {
                 $unit = (float) array_shift($pwp_map[$key])['unit'];
             } else {
                 $unit = (float) $product->get_price();
@@ -1011,6 +1019,9 @@ final class Galado_Club_Bridge {
             $item->set_quantity($qty);
             $item->set_subtotal((string) $line);
             $item->set_total((string) $line);
+            if ($is_pwp) {
+                $item->add_meta_data('_galado_pwp', '1', true); // a sale snippet's combo-line test (0.64.19)
+            }
             $scratch->add_item($item);
             $out_lines[] = ['product_id' => $pid, 'variation_id' => $vid, 'quantity' => $qty, 'unit' => round($unit, $dp), 'total' => $line];
         }
@@ -1021,24 +1032,22 @@ final class Galado_Club_Bridge {
         if ($addon > 0) {
             $fees[] = ['name' => 'Customisation add-ons', 'total' => $addon];
         }
-        $welcome_token = (string) ($p['welcome_token'] ?? '');
-        if ('' !== $welcome_token
-            && preg_match('/^appwelcome\.[A-Za-z0-9._-]{10,400}$/', $welcome_token)
-            && self::verify_welcome_token($welcome_token, $email, ['appwelcome'])
-            && !self::has_app_order($email)
-            && $items >= self::to_request_currency(self::APP_WELCOME_MIN)) {
-            $w = self::to_request_currency(self::WELCOME30_AMOUNT);
-            $fees[] = ['name' => 'GALADO Club welcome: ' . self::money_label($w) . ' off your first order', 'total' => -$w];
-        }
+        // The app welcome is decided AFTER the coupon (0.64.19): a competing sale code that takes something
+        // off replaces it, never stacks. While the coupon is applied the offer is visible to the sale's
+        // snippet through galado_first_order_offer_amount().
+        $intro = self::app_intro_offer((string) ($p['welcome_token'] ?? ''), $email, $items);
 
         $discount = 0.0;
         $free_coupon = false;
+        $yield_to = '';
         $coupon_code = strtoupper(sanitize_text_field((string) ($p['coupon'] ?? '')));
         if ('' !== $coupon_code) {
+            self::$request_intro_offer = $intro;
             $coupon = new WC_Coupon($coupon_code);
             $disc = new WC_Discounts($scratch);
             $ok = $disc->apply_coupon($coupon);
             if (is_wp_error($ok)) {
+                self::$request_intro_offer = null;
                 return new WP_Error('bad_coupon', $ok->get_error_message(), ['status' => 400]);
             }
             $free_coupon = (bool) $coupon->get_free_shipping();
@@ -1050,7 +1059,12 @@ final class Galado_Club_Bridge {
                     $free_coupon = true;
                 }
             }
+            self::$request_intro_offer = null;
             $discount = round((float) array_sum($disc->get_discounts_by_item()), $dp);
+            $yield_to = self::competing_sale_code($disc->get_discounts_by_coupon());
+        }
+        if ($intro > 0 && '' === $yield_to) {
+            $fees[] = ['name' => 'GALADO Club welcome: ' . self::money_label($intro) . ' off your first order', 'total' => -$intro];
         }
 
         $credits_points = absint($p['credits_points'] ?? 0);
@@ -1304,8 +1318,17 @@ final class Galado_Club_Bridge {
         if ($amount > 0) {
             $order->update_meta_data('_galado_intro_discount', $amount);
             $order->update_meta_data('_galado_intro_type', $type);
+        } elseif ('' !== self::$intro_yielded_to) {
+            // 0.64.19: the shopper had a first-order offer and a sale code won instead (the readout counts these).
+            $order->update_meta_data('_galado_intro_yielded', self::$intro_yielded_to);
         }
     }
+
+    /** The app welcome this /app-order or quote request qualifies for, set only while its coupon is being
+     *  applied, so galado_first_order_offer_amount() can answer a request that has no cart (0.64.19). */
+    private static $request_intro_offer = null;
+    /** The competing sale code this request's cart gave way to; capture_first_order_discount() stamps it. */
+    private static $intro_yielded_to = '';
 
     /**
      * First-order discount as a negative cart fee. A never-ordered shopper gets the BIGGER of:
@@ -1314,10 +1337,27 @@ final class Galado_Club_Bridge {
      * Never both (no stacking). Existing customers get neither; the min subtotal protects margin.
      * Applied as a negative fee so it shows on cart + checkout and flows into the order total
      * (so a referrer's 10% is on what the friend actually paid).
+     * 0.64.19: and never on top of a competing sale code that takes something off (11.11).
      */
     public static function first_order_discount($cart) {
-        if ((is_admin() && !defined('DOING_AJAX')) || !function_exists('WC')) {
+        self::$intro_yielded_to = '';
+        $offer = self::first_order_offer($cart);
+        if (!$offer) {
             return;
+        }
+        $yield = self::competing_sale_code((array) $cart->get_coupon_discount_totals());
+        if ('' !== $yield) {
+            self::$intro_yielded_to = $yield;
+            return;
+        }
+        $cart->add_fee($offer['label'], -1 * $offer['amount'], false);
+    }
+
+    /** The first-order offer this cart's shopper qualifies for, as ['amount' (request currency), 'label'],
+     *  or null. The rules first_order_discount() has always applied, read without adding anything. */
+    private static function first_order_offer($cart) {
+        if ((is_admin() && !defined('DOING_AJAX')) || !function_exists('WC')) {
+            return null;
         }
         $email    = self::current_checkout_email();
         $subtotal = (float) $cart->get_subtotal();
@@ -1333,26 +1373,77 @@ final class Galado_Club_Bridge {
             if (self::verify_welcome_token($app_token, $email, ['appwelcome'])
                 && !self::has_app_order($email)
                 && $subtotal >= self::to_request_currency(self::APP_WELCOME_MIN)) {
-                $cart->add_fee('GALADO Club welcome: ' . self::money_label($amount) . ' off your first order', -1 * $amount, false);
+                return ['amount' => $amount, 'label' => 'GALADO Club welcome: ' . self::money_label($amount) . ' off your first order'];
             }
-            return;
+            return null;
         }
         if (self::is_existing_customer() || self::has_used_intro()) {
-            return;
+            return null;
         }
         if (!empty($_COOKIE['galado_welcome'])
             && self::verify_welcome_token(wp_unslash($_COOKIE['galado_welcome']), $email)
             && $subtotal >= self::to_request_currency(self::WELCOME30_MIN)) {
             $amount = self::to_request_currency(self::WELCOME30_AMOUNT);
-            $cart->add_fee('GALADO Club welcome: ' . self::money_label($amount) . ' off your first order', -1 * $amount, false);
-            return;
+            return ['amount' => $amount, 'label' => 'GALADO Club welcome: ' . self::money_label($amount) . ' off your first order'];
         }
         if (!empty($_COOKIE['galado_ref'])
             && self::referral_code_valid(wp_unslash($_COOKIE['galado_ref']))
             && $subtotal >= self::to_request_currency(self::WELCOME_MIN)) {
             $amount = self::to_request_currency(self::WELCOME_AMOUNT);
-            $cart->add_fee('Referral welcome: ' . self::money_label($amount) . ' off your first order', -1 * $amount, false);
+            return ['amount' => $amount, 'label' => 'Referral welcome: ' . self::money_label($amount) . ' off your first order'];
         }
+        return null;
+    }
+
+    /** galado_first_order_offer_amount(): the first-order offer this shopper would get, in the request
+     *  currency, for a sale snippet choosing the bigger of the two (11.11). Inside an /app-order or quote
+     *  request it is that request's app welcome; otherwise the cart shopper's offer. Reads only. */
+    public static function first_order_offer_amount() {
+        if (null !== self::$request_intro_offer) {
+            return (float) self::$request_intro_offer;
+        }
+        if (!function_exists('WC') || !WC()->cart) {
+            return 0.0;
+        }
+        $offer = self::first_order_offer(WC()->cart);
+        return $offer ? (float) $offer['amount'] : 0.0;
+    }
+
+    /** galado_to_request_currency(): to_request_currency() for snippets (11.11 compares its steps in it). */
+    public static function rm_in_request_currency($rm) {
+        return self::to_request_currency($rm);
+    }
+
+    /** The first competing sale code (filter galado_first_order_competing_coupons, answered by the sale's
+     *  own snippet so the bridge holds no sale codes) that takes more than 0 off, from a code => amount
+     *  map; '' when none does or the rule is switched off (option galado_first_order_bigger_only = no). */
+    private static function competing_sale_code(array $by_code) {
+        if ('no' === get_option('galado_first_order_bigger_only', 'yes')) {
+            return '';
+        }
+        foreach ((array) apply_filters('galado_first_order_competing_coupons', []) as $c) {
+            $c = wc_strtolower(wc_format_coupon_code((string) $c));
+            foreach ($by_code as $code => $amount) {
+                if ('' !== $c && wc_strtolower((string) $code) === $c && (float) $amount > 0) {
+                    return $c;
+                }
+            }
+        }
+        return '';
+    }
+
+    /** The app welcome an /app-order or quote qualifies for, in the request currency, or 0: a signed
+     *  appwelcome token for this email, no earlier app order, items at least the app minimum. */
+    private static function app_intro_offer($token, $email, $items) {
+        $token = (string) $token;
+        if ('' === $token
+            || !preg_match('/^appwelcome\.[A-Za-z0-9._-]{10,400}$/', $token)
+            || !self::verify_welcome_token($token, $email, ['appwelcome'])
+            || self::has_app_order($email)
+            || (float) $items < self::to_request_currency(self::APP_WELCOME_MIN)) {
+            return 0.0;
+        }
+        return self::to_request_currency(self::WELCOME30_AMOUNT);
     }
 
     /** RM discount winback_discount() gave this request's cart. The fee is in the cart's currency; the
@@ -2544,7 +2635,8 @@ final class Galado_Club_Bridge {
                     // was billed the undiscounted figure (found by a real E2E
                     // order, 410900).
                     $pwp_key = $pid . '|' . $vid;
-                    if (!empty($pwp_map[$pwp_key]) && (int) $pwp_map[$pwp_key][0]['qty'] === $qty) {
+                    $is_pwp = !empty($pwp_map[$pwp_key]) && (int) $pwp_map[$pwp_key][0]['qty'] === $qty;
+                    if ($is_pwp) {
                         $entry = array_shift($pwp_map[$pwp_key]);
                         // S1 (owner TestFlight, 17 Sep 2026): write the RM figure and let CURCY convert
                         // ONCE on read, with the same wmc_get_price the bundles quote used for `unit`,
@@ -2557,6 +2649,15 @@ final class Galado_Club_Bridge {
                         $product->set_price((string) $base);
                     }
                     $item_id = $order->add_product($product, $qty);
+                    if ($item_id && $is_pwp) {
+                        // 0.64.19: on the order's own copy of the line (the one WC_Discounts reads), so a sale
+                        // snippet can treat bundle-priced lines as combo lines.
+                        $pwp_item = $order->get_item($item_id, false);
+                        if ($pwp_item) {
+                            $pwp_item->add_meta_data('_galado_pwp', '1', true);
+                            $pwp_item->save();
+                        }
+                    }
                     if ($item_id && is_array($l['custom'] ?? null)) {
                         $item = $order->get_item($item_id);
                         foreach ($l['custom'] as $c) {
@@ -2601,33 +2702,23 @@ final class Galado_Club_Bridge {
                     $fee->set_total((string) $addon);
                     $order->add_item($fee);
                 }
-                // App welcome RM30 on the customised/bundle path (15 Sep 2026). Same token, same
-                // rule and the SAME fee name as the cart path: the Club's webhook records the
-                // redemption by that prefix, and capture_first_order_discount() never runs here,
-                // so the intro meta is stamped by hand.
+                // The app welcome is decided here and added after the coupon (0.64.19), so a competing sale
+                // code that takes something off replaces it instead of stacking (Clement, 9 Oct 2026, 11.11).
                 $welcome_token = (string) ($p['welcome_token'] ?? '');
-                if ('' !== $welcome_token
-                    && preg_match('/^appwelcome\.[A-Za-z0-9._-]{10,400}$/', $welcome_token)
-                    && self::verify_welcome_token($welcome_token, $email, ['appwelcome'])
-                    && !self::has_app_order($email)) {
+                $intro = 0.0;
+                if ('' !== $welcome_token) {
                     $order->calculate_totals(false);
-                    if ((float) $order->get_subtotal() >= self::to_request_currency(self::APP_WELCOME_MIN)) {
-                        $w_amount = self::to_request_currency(self::WELCOME30_AMOUNT);
-                        $wfee = new WC_Order_Item_Fee();
-                        $wfee->set_name('GALADO Club welcome: ' . self::money_label($w_amount) . ' off your first order');
-                        $wfee->set_amount((string) (-$w_amount));
-                        $wfee->set_total((string) (-$w_amount));
-                        $order->add_item($wfee);
-                        $order->add_meta_data('_galado_intro_discount', (string) $w_amount);
-                        $order->add_meta_data('_galado_intro_type', 'appwelcome');
-                    }
+                    $intro = self::app_intro_offer($welcome_token, $email, (float) $order->get_subtotal());
                 }
                 $user = get_user_by('email', $email);
                 // Coupon (tier codes etc.) — validated by Woo itself.
                 $coupon = strtoupper(sanitize_text_field((string) ($p['coupon'] ?? '')));
+                $yield_to = '';
                 if ($coupon !== '') {
+                    self::$request_intro_offer = $intro;
                     $applied = $order->apply_coupon($coupon);
                     if (is_wp_error($applied)) {
+                        self::$request_intro_offer = null;
                         $order->delete(true);
                         return new WP_Error('bad_coupon', $applied->get_error_message(), ['status' => 400]);
                     }
@@ -2639,6 +2730,27 @@ final class Galado_Club_Bridge {
                             error_log('[galado-club-bridge] app-order partner coupon ' . $pc . ' refused: ' . $partner_applied->get_error_message());
                         }
                     }
+                    self::$request_intro_offer = null;
+                    $by_code = [];
+                    foreach ($order->get_items('coupon') as $coupon_item) {
+                        $by_code[$coupon_item->get_code()] = (float) $coupon_item->get_discount();
+                    }
+                    $yield_to = self::competing_sale_code($by_code);
+                }
+                // App welcome RM30 on the customised/bundle path (15 Sep 2026). Same token, same
+                // rule and the SAME fee name as the cart path: the Club's webhook records the
+                // redemption by that prefix, and capture_first_order_discount() never runs here,
+                // so the intro meta is stamped by hand.
+                if ($intro > 0 && '' === $yield_to) {
+                    $wfee = new WC_Order_Item_Fee();
+                    $wfee->set_name('GALADO Club welcome: ' . self::money_label($intro) . ' off your first order');
+                    $wfee->set_amount((string) (-$intro));
+                    $wfee->set_total((string) (-$intro));
+                    $order->add_item($wfee);
+                    $order->add_meta_data('_galado_intro_discount', (string) $intro);
+                    $order->add_meta_data('_galado_intro_type', 'appwelcome');
+                } elseif ($intro > 0) {
+                    $order->add_meta_data('_galado_intro_yielded', $yield_to);
                 }
                 // Shopping Credits redemption — same deduction the POS uses
                 // (10 points = RM1), surfaced as a negative fee line.
@@ -4394,6 +4506,20 @@ window.GLD_TIER = <?php echo wp_json_encode($cfg); ?>;
         <?php
     }
 
+}
+
+if (!function_exists('galado_first_order_offer_amount')) {
+    /** The shopper's first-order offer in the request currency (RM30 app welcome, RM10 referral, or 0), for
+     *  a sale snippet choosing the bigger of the two (0.64.19, sale-1111/BRIDGE-CONTRACT.md). */
+    function galado_first_order_offer_amount() {
+        return Galado_Club_Bridge::first_order_offer_amount();
+    }
+}
+if (!function_exists('galado_to_request_currency')) {
+    /** An RM amount in the request currency at CURCY's straight rate, the bridge's own conversion. */
+    function galado_to_request_currency($rm) {
+        return Galado_Club_Bridge::rm_in_request_currency($rm);
+    }
 }
 
 Galado_Club_Bridge::init();
