@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.64.17
+ * Version: 0.64.18
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -43,6 +43,10 @@ final class Galado_Club_Bridge {
 
     const ENDPOINT = 'galado-club';
     const VERSION  = '0.64.2';   // 0.64.2: provision-customer enriches existing accounts (blank-only billing phone/name from POS)
+    // 0.64.18: paired sale codes in the app (Club Dev, 9 Oct 2026, the 10.10 sale): /app-order and its quote
+    //   apply a coupon's partners after it, named by the filter galado_coupon_partners (snippet #435 answers
+    //   GLD1010 with gld1010-rm10, the RM10 the website cart adds on woocommerce_applied_coupon, which never
+    //   fires without a cart). A refused partner leaves the main code, as in the cart. No sale codes live here.
     // 0.64.17: perk copy promises only what members get (owner, 8 Oct 2026: "Whichever that now we no longer
     //   give or honour then we need to remove and put a proper correct expectation"). Nothing ever gated drops
     //   by tier, so the cart tier perks swap "early access" for the coin multiplier and the member discount
@@ -914,6 +918,20 @@ final class Galado_Club_Bridge {
         return null;
     }
 
+    /** The codes a coupon brings with it, from the filter galado_coupon_partners (lowercase codes, the main
+     *  code and repeats dropped). /app-order and its quote apply them after the main code, in this order. */
+    private static function coupon_partners($code) {
+        $main = wc_strtolower(wc_format_coupon_code((string) $code));
+        $out  = [];
+        foreach ((array) apply_filters('galado_coupon_partners', [], $main) as $c) {
+            $c = wc_strtolower(wc_format_coupon_code((string) $c));
+            if ('' !== $c && $c !== $main && !in_array($c, $out, true)) {
+                $out[] = $c;
+            }
+        }
+        return $out;
+    }
+
     /**
      * Price an /app-order body without creating an order. Mirrors the route step by step: PWP lines
      * at the bundles-quote unit, other lines at the product price CURCY gives this request,
@@ -1023,8 +1041,16 @@ final class Galado_Club_Bridge {
             if (is_wp_error($ok)) {
                 return new WP_Error('bad_coupon', $ok->get_error_message(), ['status' => 400]);
             }
-            $discount = round((float) array_sum($disc->get_discounts_by_item()), $dp);
             $free_coupon = (bool) $coupon->get_free_shipping();
+            // Partners on the same WC_Discounts after the main code, as /app-order adds them, so the quote
+            // prices what the order will charge. A refused partner is left off there too.
+            foreach (self::coupon_partners($coupon_code) as $pc) {
+                $partner = new WC_Coupon($pc);
+                if (true === $disc->apply_coupon($partner) && $partner->get_free_shipping()) {
+                    $free_coupon = true;
+                }
+            }
+            $discount = round((float) array_sum($disc->get_discounts_by_item()), $dp);
         }
 
         $credits_points = absint($p['credits_points'] ?? 0);
@@ -2604,6 +2630,14 @@ final class Galado_Club_Bridge {
                     if (is_wp_error($applied)) {
                         $order->delete(true);
                         return new WP_Error('bad_coupon', $applied->get_error_message(), ['status' => 400]);
+                    }
+                    // 0.64.18: a paired sale code's partner (GLD1010's RM10), which the website cart adds
+                    // on its own. A refused partner leaves the main code, as in the cart and the quote.
+                    foreach (self::coupon_partners($coupon) as $pc) {
+                        $partner_applied = $order->apply_coupon($pc);
+                        if (is_wp_error($partner_applied)) {
+                            error_log('[galado-club-bridge] app-order partner coupon ' . $pc . ' refused: ' . $partner_applied->get_error_message());
+                        }
                     }
                 }
                 // Shopping Credits redemption — same deduction the POS uses
