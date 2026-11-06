@@ -2,7 +2,7 @@
 /**
  * Plugin Name: GALADO Club Bridge
  * Description: Connects galado.com.my accounts to GALADO Club — adds a "GALADO Club" tab in My Account, signs members into club.galado.com.my (SSO), and mirrors Club tiers to user meta.
- * Version: 0.64.19
+ * Version: 0.64.21
  * Author: GALADO
  *
  * Deploy checklist (wp-config.php):
@@ -50,6 +50,11 @@ final class Galado_Club_Bridge {
     //   galado_to_request_currency() let the snippet compare in the shopper's currency; bundle-priced app
     //   lines carry _galado_pwp. Contract: galado-woo-integrity/sale-1111/BRIDGE-CONTRACT.md. Off switch:
     //   option galado_first_order_bigger_only = no.
+    // 0.64.20: a sale can apply itself with no code (Clement, 30 Oct 2026: 11.11 needs no code). The sale's
+    //   snippet names its codes through galado_auto_coupons; the app quote and the app order price the
+    //   shopper's own code and those codes apart and keep the bigger saving, never both, a tie going to the
+    //   sale, as on the website (choose_codes). The quote says how the discount is labelled (discount_label).
+    //   Contract: sale-1111/BRIDGE-CONTRACT.md sections 5 and 6.
     // 0.64.18: paired sale codes in the app (Club Dev, 9 Oct 2026, the 10.10 sale): /app-order and its quote
     //   apply a coupon's partners after it, named by the filter galado_coupon_partners (snippet #435 answers
     //   GLD1010 with gld1010-rm10, the RM10 the website cart adds on woocommerce_applied_coupon, which never
@@ -939,6 +944,102 @@ final class Galado_Club_Bridge {
         return $out;
     }
 
+    /** The codes the running sale applies by itself (0.64.20), from the filter galado_auto_coupons, answered by
+     *  the sale's own snippet so the bridge holds no dates or percents: lowercase, repeats dropped. */
+    private static function auto_coupons(WC_Order $order) {
+        $out = [];
+        foreach ((array) apply_filters('galado_auto_coupons', [], ['order' => $order]) as $c) {
+            $c = wc_strtolower(wc_format_coupon_code((string) $c));
+            if ('' !== $c && !in_array($c, $out, true)) {
+                $out[] = $c;
+            }
+        }
+        return $out;
+    }
+
+    /** Prices codes on a fresh WC_Discounts for an order this never saves (0.64.20). A refused code is left off.
+     *  → codes applied, amount, free_shipping, by_code, and the first refusal (WP_Error or null). */
+    private static function price_codes(WC_Order $order, array $codes) {
+        $disc = new WC_Discounts($order);
+        $applied = [];
+        $free = false;
+        $first_error = null;
+        foreach ($codes as $code) {
+            $coupon = new WC_Coupon($code);
+            $ok = $disc->apply_coupon($coupon);
+            if (is_wp_error($ok)) {
+                $first_error = $first_error ?: $ok;
+                continue;
+            }
+            $applied[] = wc_strtolower(wc_format_coupon_code((string) $code));
+            $free = $free || (bool) $coupon->get_free_shipping();
+        }
+        return [
+            'codes'         => $applied,
+            'amount'        => (float) array_sum($disc->get_discounts_by_item()),
+            'free_shipping' => $free,
+            'by_code'       => $disc->get_discounts_by_coupon(),
+            'first_error'   => $first_error,
+        ];
+    }
+
+    /**
+     * Which codes an app quote or app order gets (0.64.20; Clement, 30 Oct 2026: 11.11 needs no code): the
+     * shopper's own code (with its partners) or the sale's automatic codes, whichever takes more off, never
+     * both, a tie going to the sale, as on the website. A gift card code always rides along. Priced on $probe,
+     * which is never saved. → a price_codes() result, null when there is nothing to apply, or a WP_Error
+     * when the shopper's own code is refused (as before 0.64.20).
+     */
+    private static function choose_codes(WC_Order $probe, $own_code) {
+        $auto = self::auto_coupons($probe);
+        if ('' === $own_code) {
+            return $auto ? self::price_codes($probe, $auto) : null;
+        }
+        $own_key = wc_strtolower(wc_format_coupon_code((string) $own_code));
+        $gift = $auto && function_exists('galado_gift_cards_is_gift_card_code') && galado_gift_cards_is_gift_card_code($own_code);
+        $own = self::price_codes($probe, $gift ? array_merge($auto, [$own_key]) : array_merge([$own_key], self::coupon_partners($own_key)));
+        if (!in_array($own_key, $own['codes'], true)) {
+            $msg = $own['first_error'] ? $own['first_error']->get_error_message() : 'This code cannot be used.';
+            return new WP_Error('bad_coupon', $msg, ['status' => 400]);
+        }
+        if ($gift || !$auto) {
+            return $own;
+        }
+        $sale = self::price_codes($probe, $auto);
+        return ($sale['amount'] > 0 && $sale['amount'] >= $own['amount']) ? $sale : $own;
+    }
+
+    /** The label a priced result's discount carries, as the website's totals show it: a sale's snippet names
+     *  its own codes (11.11: "11.11 sale") through woocommerce_cart_totals_coupon_label (0.64.20). */
+    private static function codes_label($priced) {
+        if (!$priced || !$priced['codes'] || $priced['amount'] <= 0) {
+            return '';
+        }
+        $coupon = new WC_Coupon($priced['codes'][0]);
+        return wp_strip_all_tags((string) apply_filters('woocommerce_cart_totals_coupon_label', sprintf(esc_html__('Coupon: %s', 'woocommerce'), $coupon->get_code()), $coupon));
+    }
+
+    /** An in-memory copy of an app order's product lines and billing email, to price codes on without touching
+     *  the order itself (a sale's snippet may note what it priced on the order it sees). Never saved (0.64.20). */
+    private static function probe_order(WC_Order $order) {
+        $probe = new WC_Order();
+        $probe->set_billing_email($order->get_billing_email());
+        $n = 0;
+        foreach ($order->get_items() as $item) {
+            $copy = new WC_Order_Item_Product();
+            $copy->set_id(PHP_INT_MAX - $n++); // unsaved items need ids of their own: see app_order_quote()
+            $copy->set_product($item->get_product());
+            $copy->set_quantity($item->get_quantity());
+            $copy->set_subtotal((string) $item->get_subtotal());
+            $copy->set_total((string) $item->get_subtotal());
+            if ('1' === (string) $item->get_meta('_galado_pwp')) {
+                $copy->add_meta_data('_galado_pwp', '1', true);
+            }
+            $probe->add_item($copy);
+        }
+        return $probe;
+    }
+
     /**
      * Price an /app-order body without creating an order. Mirrors the route step by step: PWP lines
      * at the bundles-quote unit, other lines at the product price CURCY gives this request,
@@ -975,6 +1076,11 @@ final class Galado_Club_Bridge {
                     return new WP_Error('bad_request', 'bundle_quote: ' . (string) ($quote['message'] ?? 'invalid'), ['status' => 400]);
                 }
                 foreach ((array) $quote['lines'] as $ql) {
+                    // 0.64.21: the case that anchors a set keeps its own price and is not a bundle line, as in the
+                    // website cart, so a sale's step still applies to it (11.11 check, 6 Nov 2026).
+                    if ('anchor' === ($ql['kind'] ?? '')) {
+                        continue;
+                    }
                     $pwp_map[(int) $ql['product_id'] . '|' . (int) $ql['variation_id']][] = ['unit' => (float) $ql['unit'], 'qty' => (int) $ql['qty']];
                     if (!empty($ql['pwp']) && !empty($ql['circle'])) {
                         $claimed[] = (string) $ql['circle'];
@@ -1040,28 +1146,21 @@ final class Galado_Club_Bridge {
         $discount = 0.0;
         $free_coupon = false;
         $yield_to = '';
+        $discount_label = '';
         $coupon_code = strtoupper(sanitize_text_field((string) ($p['coupon'] ?? '')));
-        if ('' !== $coupon_code) {
-            self::$request_intro_offer = $intro;
-            $coupon = new WC_Coupon($coupon_code);
-            $disc = new WC_Discounts($scratch);
-            $ok = $disc->apply_coupon($coupon);
-            if (is_wp_error($ok)) {
-                self::$request_intro_offer = null;
-                return new WP_Error('bad_coupon', $ok->get_error_message(), ['status' => 400]);
-            }
-            $free_coupon = (bool) $coupon->get_free_shipping();
-            // Partners on the same WC_Discounts after the main code, as /app-order adds them, so the quote
-            // prices what the order will charge. A refused partner is left off there too.
-            foreach (self::coupon_partners($coupon_code) as $pc) {
-                $partner = new WC_Coupon($pc);
-                if (true === $disc->apply_coupon($partner) && $partner->get_free_shipping()) {
-                    $free_coupon = true;
-                }
-            }
-            self::$request_intro_offer = null;
-            $discount = round((float) array_sum($disc->get_discounts_by_item()), $dp);
-            $yield_to = self::competing_sale_code($disc->get_discounts_by_coupon());
+        // 0.64.20: the shopper's own code (its partners on the same WC_Discounts, as /app-order adds them) or the
+        // sale's automatic codes, whichever takes more off, never both. A refused own code is still a 400.
+        self::$request_intro_offer = $intro;
+        $chosen = self::choose_codes($scratch, $coupon_code);
+        self::$request_intro_offer = null;
+        if (is_wp_error($chosen)) {
+            return $chosen;
+        }
+        if ($chosen) {
+            $free_coupon = $chosen['free_shipping'];
+            $discount = round($chosen['amount'], $dp);
+            $yield_to = self::competing_sale_code($chosen['by_code']);
+            $discount_label = self::codes_label($chosen);
         }
         if ($intro > 0 && '' === $yield_to) {
             $fees[] = ['name' => 'GALADO Club welcome: ' . self::money_label($intro) . ' off your first order', 'total' => -$intro];
@@ -1093,6 +1192,7 @@ final class Galado_Club_Bridge {
             'lines'          => $out_lines,
             'items_subtotal' => round($items, $dp),
             'discount_total' => $discount,
+            'discount_label' => $discount_label, // 0.64.20: e.g. "11.11 sale" when the sale applied itself
             'fees'           => $fees,
             'shipping'       => $rate ? ['title' => $rate['title'], 'method_id' => $rate['method_id'], 'total' => $shipping] : null,
             'total'          => $total,
@@ -2587,6 +2687,9 @@ final class Galado_Club_Bridge {
                                 'bundle_quote: ' . (string) ($quote['message'] ?? 'invalid'), ['status' => 400]);
                         }
                         foreach ((array) $quote['lines'] as $ql) {
+                            if ('anchor' === ($ql['kind'] ?? '')) {
+                                continue; // 0.64.21: the anchoring case is not a bundle line (see app_order_quote)
+                            }
                             $key = (int) $ql['product_id'] . '|' . (int) $ql['variation_id'];
                             // S1 (17 Sep 2026): keep the RM `unit_base` (bundles v0.21+). `unit` is
                             // already in the shopper's currency and CURCY converts again on read.
@@ -2711,32 +2814,39 @@ final class Galado_Club_Bridge {
                     $intro = self::app_intro_offer($welcome_token, $email, (float) $order->get_subtotal());
                 }
                 $user = get_user_by('email', $email);
-                // Coupon (tier codes etc.) — validated by Woo itself.
+                // Coupons (tier codes etc.) — validated by Woo itself. 0.64.20: the shopper's own code (with a
+                // paired sale code's partner, 0.64.18) or the sale's automatic codes, whichever takes more off,
+                // chosen on a copy of the order (choose_codes) and then applied here, never both.
                 $coupon = strtoupper(sanitize_text_field((string) ($p['coupon'] ?? '')));
                 $yield_to = '';
-                if ($coupon !== '') {
-                    self::$request_intro_offer = $intro;
-                    $applied = $order->apply_coupon($coupon);
-                    if (is_wp_error($applied)) {
-                        self::$request_intro_offer = null;
-                        $order->delete(true);
-                        return new WP_Error('bad_coupon', $applied->get_error_message(), ['status' => 400]);
-                    }
-                    // 0.64.18: a paired sale code's partner (GLD1010's RM10), which the website cart adds
-                    // on its own. A refused partner leaves the main code, as in the cart and the quote.
-                    foreach (self::coupon_partners($coupon) as $pc) {
-                        $partner_applied = $order->apply_coupon($pc);
-                        if (is_wp_error($partner_applied)) {
-                            error_log('[galado-club-bridge] app-order partner coupon ' . $pc . ' refused: ' . $partner_applied->get_error_message());
-                        }
-                    }
+                self::$request_intro_offer = $intro;
+                $chosen = self::choose_codes(self::probe_order($order), $coupon);
+                if (is_wp_error($chosen)) {
                     self::$request_intro_offer = null;
+                    $order->delete(true);
+                    return $chosen;
+                }
+                if ($chosen) {
+                    $own_key = wc_strtolower(wc_format_coupon_code($coupon));
+                    foreach ($chosen['codes'] as $code) {
+                        $applied = $order->apply_coupon($code);
+                        if (!is_wp_error($applied)) {
+                            continue;
+                        }
+                        if ('' !== $coupon && $code === $own_key) {
+                            self::$request_intro_offer = null;
+                            $order->delete(true);
+                            return new WP_Error('bad_coupon', $applied->get_error_message(), ['status' => 400]);
+                        }
+                        error_log('[galado-club-bridge] app-order coupon ' . $code . ' refused: ' . $applied->get_error_message());
+                    }
                     $by_code = [];
                     foreach ($order->get_items('coupon') as $coupon_item) {
                         $by_code[$coupon_item->get_code()] = (float) $coupon_item->get_discount();
                     }
                     $yield_to = self::competing_sale_code($by_code);
                 }
+                self::$request_intro_offer = null;
                 // App welcome RM30 on the customised/bundle path (15 Sep 2026). Same token, same
                 // rule and the SAME fee name as the cart path: the Club's webhook records the
                 // redemption by that prefix, and capture_first_order_discount() never runs here,
